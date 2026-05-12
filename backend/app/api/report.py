@@ -39,6 +39,14 @@ def generate_report():
         if not force_regenerate:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
             if existing_report and existing_report.status == ReportStatus.COMPLETED:
+                existing_issues = ReportManager.validate_report_output(existing_report)
+                blocking_issues = [issue for issue in existing_issues if issue.get("blocking")]
+                if blocking_issues:
+                    return jsonify({"success": False, "error": "Existing report has validation issues. Regenerate it with force_regenerate=true.", "data": {
+                        "simulation_id": simulation_id,
+                        "report_id": existing_report.report_id,
+                        "validation_issues": existing_issues,
+                    }}), 409
                 return jsonify({"success": True, "data": {
                     "simulation_id": simulation_id,
                     "report_id": existing_report.report_id,
@@ -73,6 +81,20 @@ def generate_report():
         storage = current_app.extensions.get('neo4j_storage')
         if not storage:
             return jsonify({"success": False, "error": "GraphStorage not initialized — check Neo4j connection"}), 500
+
+        embedding_status = storage.get_embedding_status(graph_id)
+        allow_degraded = bool(data.get("allow_degraded", False))
+        if not embedding_status.get("safe_to_report") and not allow_degraded:
+            return jsonify({
+                "success": False,
+                "error": "Graph is not ready for semantic report generation. Rebuild or re-embed the graph first.",
+                "data": {
+                    "graph_id": graph_id,
+                    "embedding_status": embedding_status,
+                    "hint": f"POST /api/graph/{graph_id}/reembed or run scripts/reembed_graph.py --graph-id {graph_id}"
+                }
+            }), 409
+
         graph_tools = GraphToolsService(storage=storage)
 
         def run_generate():

@@ -49,6 +49,17 @@ def create_app(config_class=Config):
         app.extensions['neo4j_storage'] = neo4j_storage
         if should_log_startup:
             logger.info("Neo4jStorage initialized (connected to %s)", Config.NEO4J_URI)
+            if Config.STARTUP_STATUS_CHECK:
+                status = neo4j_storage.health_status()
+                embedding = status.get("embedding", {})
+                logger.info(
+                    "Startup status: neo4j=%s embedding=%s vector_search_usable=%s",
+                    status.get("healthy"),
+                    embedding.get("healthy"),
+                    status.get("vector_search_usable"),
+                )
+                if not embedding.get("healthy"):
+                    logger.warning("Embedding provider is not ready: %s", embedding.get("error"))
     except Exception as e:
         logger.error("Neo4jStorage initialization failed: %s", e)
         # Store None so endpoints can return 503 gracefully
@@ -75,7 +86,8 @@ def create_app(config_class=Config):
         return response
 
     # Register blueprints
-    from .api import graph_bp, simulation_bp, report_bp
+    from .api import graph_bp, simulation_bp, report_bp, status_bp
+    app.register_blueprint(status_bp, url_prefix='/api')
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
     app.register_blueprint(report_bp, url_prefix='/api/report')

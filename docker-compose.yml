@@ -16,7 +16,7 @@ services:
       neo4j:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
 
   neo4j:
     image: neo4j:5.18-community
@@ -48,6 +48,12 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     deploy:
       resources:
         reservations:

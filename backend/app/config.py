@@ -28,6 +28,7 @@ class Config:
     JSON_AS_ASCII = False
 
     # LLM configuration (unified OpenAI format)
+    LLM_DEFAULT_PROVIDER = os.environ.get('LLM_DEFAULT_PROVIDER', 'ollama')
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'qwen2.5:32b')
@@ -38,8 +39,19 @@ class Config:
     NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'mirofish')
 
     # Embedding configuration
+    EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'ollama').strip().lower()
     EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nomic-embed-text')
     EMBEDDING_BASE_URL = os.environ.get('EMBEDDING_BASE_URL', 'http://localhost:11434')
+    EMBEDDING_DIMENSIONS = int(os.environ.get('EMBEDDING_DIMENSIONS', '768'))
+    EMBEDDING_AUTO_PULL = os.environ.get('EMBEDDING_AUTO_PULL', 'True').lower() == 'true'
+    EMBEDDING_CIRCUIT_BREAKER_SECONDS = int(os.environ.get('EMBEDDING_CIRCUIT_BREAKER_SECONDS', '60'))
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+    GEMINI_EMBEDDING_MODEL = os.environ.get('GEMINI_EMBEDDING_MODEL', 'gemini-embedding-2')
+    GEMINI_EMBEDDING_BASE_URL = os.environ.get(
+        'GEMINI_EMBEDDING_BASE_URL',
+        'https://generativelanguage.googleapis.com/v1beta'
+    )
+    STARTUP_STATUS_CHECK = os.environ.get('STARTUP_STATUS_CHECK', 'True').lower() == 'true'
 
     # File upload configuration
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
@@ -68,6 +80,7 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+    REPORT_AGENT_INTERVIEW_TIMEOUT = float(os.environ.get('REPORT_AGENT_INTERVIEW_TIMEOUT', '45'))
 
     @classmethod
     def validate(cls):

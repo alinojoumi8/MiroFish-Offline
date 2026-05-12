@@ -9,6 +9,7 @@ import os
 import re
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
+import requests
 
 from ..config import Config
 
@@ -26,6 +27,7 @@ class LLMClient:
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
+        self.timeout = timeout
 
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
@@ -43,6 +45,58 @@ class LLMClient:
     def _is_ollama(self) -> bool:
         """Check if we're talking to an Ollama server."""
         return '11434' in (self.base_url or '')
+
+    def _is_anthropic_compatible(self) -> bool:
+        """Check if we're talking to an Anthropic Messages compatible endpoint."""
+        return 'anthropic' in (self.base_url or '') or (self.base_url or '').rstrip('/').endswith('/coding')
+
+    def _chat_anthropic(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Send chat request to an Anthropic Messages compatible endpoint."""
+        system_messages = [m.get("content", "") for m in messages if m.get("role") == "system"]
+        chat_messages = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in messages
+            if m.get("role") != "system"
+        ]
+
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": chat_messages,
+        }
+        if system_messages:
+            body["system"] = "\n\n".join(system_messages)
+        if temperature is not None:
+            body["temperature"] = temperature
+
+        url = f"{self.base_url.rstrip('/')}/v1/messages"
+        response = requests.post(
+            url,
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=body,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = [
+            item.get("text", "")
+            for item in data.get("content", [])
+            if item.get("type") == "text" and item.get("text")
+        ]
+        content = "\n".join(text_parts).strip()
+        if not content:
+            raise ValueError("Anthropic-compatible LLM returned no text content")
+        return content
 
     def chat(
         self,
@@ -63,6 +117,13 @@ class LLMClient:
         Returns:
             Model response text
         """
+        if self._is_anthropic_compatible():
+            return self._chat_anthropic(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
         kwargs = {
             "model": self.model,
             "messages": messages,

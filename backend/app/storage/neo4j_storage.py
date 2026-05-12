@@ -21,7 +21,7 @@ from neo4j.exceptions import (
 
 from ..config import Config
 from .graph_storage import GraphStorage
-from .embedding_service import EmbeddingService
+from .embedding_service import EmbeddingError, EmbeddingService
 from .ner_extractor import NERExtractor
 from .search_service import SearchService
 from . import neo4j_schema
@@ -60,6 +60,57 @@ class Neo4jStorage(GraphStorage):
     def close(self):
         """Close the Neo4j driver connection."""
         self._driver.close()
+
+    def health_status(self) -> Dict[str, Any]:
+        """Detailed Neo4j and vector-search readiness status."""
+        status: Dict[str, Any] = {
+            "healthy": False,
+            "uri": self._uri,
+            "edition": None,
+            "version": None,
+            "error": None,
+            "embedding": self._embedding.health_status(),
+            "vector_search_usable": False,
+        }
+
+        try:
+            with self._driver.session() as session:
+                record = session.run(
+                    """
+                    CALL dbms.components()
+                    YIELD name, versions, edition
+                    RETURN versions[0] AS version, edition
+                    LIMIT 1
+                    """
+                ).single()
+                if record:
+                    status["version"] = record["version"]
+                    status["edition"] = record["edition"]
+
+                index_records = list(session.run(
+                    """
+                    SHOW INDEXES
+                    YIELD name, type, state
+                    WHERE name IN ['entity_embedding', 'fact_embedding']
+                    RETURN name, type, state
+                    """
+                ))
+                status["vector_indexes"] = [
+                    {"name": rec["name"], "type": rec["type"], "state": rec["state"]}
+                    for rec in index_records
+                ]
+                status["vector_search_usable"] = (
+                    status["embedding"].get("healthy") is True
+                    and len(index_records) == 2
+                    and all(rec["state"] == "ONLINE" for rec in index_records)
+                    and self._embedding.dimensions == neo4j_schema.VECTOR_DIMENSIONS
+                )
+
+            status["healthy"] = True
+        except Exception as exc:
+            status["error"] = str(exc)
+
+        return status
 
     def _ensure_schema(self):
         """Create indexes and constraints if they don't exist."""
@@ -103,6 +154,7 @@ class Neo4jStorage(GraphStorage):
     def create_graph(self, name: str, description: str = "") -> str:
         graph_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        embedding_info = self._embedding.info
 
         def _create(tx):
             tx.run(
@@ -112,12 +164,20 @@ class Neo4jStorage(GraphStorage):
                     name: $name,
                     description: $description,
                     ontology_json: '{}',
+                    embedding_provider: $embedding_provider,
+                    embedding_model: $embedding_model,
+                    embedding_dimensions: $embedding_dimensions,
+                    embedding_provider_id: $embedding_provider_id,
                     created_at: $created_at
                 })
                 """,
                 graph_id=graph_id,
                 name=name,
                 description=description,
+                embedding_provider=embedding_info.provider,
+                embedding_model=embedding_info.model,
+                embedding_dimensions=embedding_info.dimensions,
+                embedding_provider_id=embedding_info.provider_id,
                 created_at=now,
             )
 
@@ -169,12 +229,245 @@ class Neo4jStorage(GraphStorage):
                 return json.loads(record["oj"])
             return {}
 
+    def get_graph_embedding_info(self, graph_id: str) -> Dict[str, Any]:
+        """Return embedding metadata stored on the graph node."""
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (g:Graph {graph_id: $gid})
+                RETURN g.embedding_provider AS provider,
+                       g.embedding_model AS model,
+                       g.embedding_dimensions AS dimensions,
+                       g.embedding_provider_id AS provider_id
+                """,
+                gid=graph_id,
+            )
+            record = result.single()
+            if not record:
+                raise ValueError(f"Graph does not exist: {graph_id}")
+            return {
+                "provider": record["provider"],
+                "model": record["model"],
+                "dimensions": record["dimensions"],
+                "provider_id": record["provider_id"],
+            }
+
+    def get_embedding_status(self, graph_id: str) -> Dict[str, Any]:
+        """Return vector coverage and report-readiness for a graph."""
+        graph_info = self.get_graph_embedding_info(graph_id)
+        current = self._embedding.info
+        compatible = self._is_graph_embedding_compatible(graph_info)
+
+        with self._driver.session() as session:
+            node_record = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                RETURN count(n) AS total,
+                       sum(CASE
+                           WHEN n.embedding IS NOT NULL AND size(n.embedding) = $dims
+                           THEN 1 ELSE 0 END) AS embedded
+                """,
+                gid=graph_id,
+                dims=current.dimensions,
+            ).single()
+            rel_record = session.run(
+                """
+                MATCH ()-[r:RELATION {graph_id: $gid}]->()
+                RETURN count(r) AS total,
+                       sum(CASE
+                           WHEN r.fact_embedding IS NOT NULL AND size(r.fact_embedding) = $dims
+                           THEN 1 ELSE 0 END) AS embedded
+                """,
+                gid=graph_id,
+                dims=current.dimensions,
+            ).single()
+
+        node_count = int(node_record["total"] or 0)
+        nodes_embedded = int(node_record["embedded"] or 0)
+        relationship_count = int(rel_record["total"] or 0)
+        relationships_embedded = int(rel_record["embedded"] or 0)
+        nodes_missing = node_count - nodes_embedded
+        relationships_missing = relationship_count - relationships_embedded
+        total_items = node_count + relationship_count
+        embedded_items = nodes_embedded + relationships_embedded
+
+        issues: List[str] = []
+        if not compatible:
+            issues.append(
+                "Graph embedding provider does not match the active provider; rebuild or re-embed before reporting."
+            )
+        if total_items == 0:
+            issues.append("Graph has no entities or relationships to report on.")
+        if nodes_missing or relationships_missing:
+            issues.append(
+                f"Missing embeddings: {nodes_missing}/{node_count} nodes and "
+                f"{relationships_missing}/{relationship_count} relationships."
+            )
+
+        return {
+            "graph_id": graph_id,
+            "provider": graph_info.get("provider"),
+            "model": graph_info.get("model"),
+            "dimensions": graph_info.get("dimensions"),
+            "provider_id": graph_info.get("provider_id"),
+            "current_provider_id": current.provider_id,
+            "compatible": compatible,
+            "node_count": node_count,
+            "nodes_embedded": nodes_embedded,
+            "nodes_missing": nodes_missing,
+            "relationship_count": relationship_count,
+            "relationships_embedded": relationships_embedded,
+            "relationships_missing": relationships_missing,
+            "vector_coverage": embedded_items / total_items if total_items else 0.0,
+            "safe_to_report": compatible and total_items > 0 and not nodes_missing and not relationships_missing,
+            "issues": issues,
+        }
+
+    def reembed_graph(self, graph_id: str, batch_size: int = 32) -> Dict[str, Any]:
+        """Backfill entity and relationship embeddings for a graph."""
+        status = self.get_embedding_status(graph_id)
+        if not status.get("compatible"):
+            raise EmbeddingError("; ".join(status.get("issues") or ["Graph embedding provider mismatch"]))
+
+        targets = self._read_embedding_targets(graph_id)
+        nodes = targets["nodes"]
+        relationships = targets["relationships"]
+        texts = [item["text"] for item in nodes] + [item["text"] for item in relationships]
+        vectors = self._embedding.embed_batch(texts, batch_size=batch_size) if texts else []
+
+        node_vectors = vectors[:len(nodes)]
+        relationship_vectors = vectors[len(nodes):]
+        node_updates = [
+            {"uuid": item["uuid"], "embedding": vector}
+            for item, vector in zip(nodes, node_vectors)
+        ]
+        relationship_updates = [
+            {"uuid": item["uuid"], "embedding": vector}
+            for item, vector in zip(relationships, relationship_vectors)
+        ]
+
+        self._write_embeddings(graph_id, node_updates, relationship_updates)
+        self._update_graph_embedding_metadata(graph_id)
+        after = self.get_embedding_status(graph_id)
+        return {
+            "graph_id": graph_id,
+            "embedded_nodes": len(node_updates),
+            "embedded_relationships": len(relationship_updates),
+            "status": after,
+        }
+
+    def _read_embedding_targets(self, graph_id: str) -> Dict[str, List[Dict[str, str]]]:
+        current = self._embedding.info
+        with self._driver.session() as session:
+            node_records = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                WHERE n.embedding IS NULL OR size(n.embedding) <> $dims
+                RETURN n.uuid AS uuid,
+                       trim(coalesce(n.name, '') + ': ' + coalesce(n.summary, '')) AS text
+                """,
+                gid=graph_id,
+                dims=current.dimensions,
+            )
+            rel_records = session.run(
+                """
+                MATCH ()-[r:RELATION {graph_id: $gid}]->()
+                WHERE r.fact_embedding IS NULL OR size(r.fact_embedding) <> $dims
+                RETURN r.uuid AS uuid, coalesce(r.fact, r.name, '') AS text
+                """,
+                gid=graph_id,
+                dims=current.dimensions,
+            )
+            return {
+                "nodes": [
+                    {"uuid": record["uuid"], "text": record["text"] or record["uuid"]}
+                    for record in node_records
+                ],
+                "relationships": [
+                    {"uuid": record["uuid"], "text": record["text"] or record["uuid"]}
+                    for record in rel_records
+                ],
+            }
+
+    def _write_embeddings(
+        self,
+        graph_id: str,
+        nodes: List[Dict[str, Any]],
+        relationships: List[Dict[str, Any]],
+    ) -> None:
+        with self._driver.session() as session:
+            if nodes:
+                session.run(
+                    """
+                    UNWIND $rows AS row
+                    MATCH (n:Entity {graph_id: $gid, uuid: row.uuid})
+                    SET n.embedding = row.embedding
+                    """,
+                    gid=graph_id,
+                    rows=nodes,
+                )
+            if relationships:
+                session.run(
+                    """
+                    UNWIND $rows AS row
+                    MATCH ()-[r:RELATION {graph_id: $gid, uuid: row.uuid}]->()
+                    SET r.fact_embedding = row.embedding
+                    """,
+                    gid=graph_id,
+                    rows=relationships,
+                )
+
+    def _update_graph_embedding_metadata(self, graph_id: str) -> None:
+        info = self._embedding.info
+        with self._driver.session() as session:
+            session.run(
+                """
+                MATCH (g:Graph {graph_id: $gid})
+                SET g.embedding_provider = $provider,
+                    g.embedding_model = $model,
+                    g.embedding_dimensions = $dimensions,
+                    g.embedding_provider_id = $provider_id
+                """,
+                gid=graph_id,
+                provider=info.provider,
+                model=info.model,
+                dimensions=info.dimensions,
+                provider_id=info.provider_id,
+            )
+
+    def _assert_embedding_compatible(self, graph_id: str) -> None:
+        """Prevent querying or appending vectors from a different embedding space."""
+        graph_info = self.get_graph_embedding_info(graph_id)
+        current = self._embedding.info
+        if self._is_graph_embedding_compatible(graph_info):
+            return
+
+        if not graph_info.get("provider_id"):
+            raise EmbeddingError(
+                "Graph has no embedding provider metadata and cannot be safely searched "
+                f"with {current.provider_id}. Rebuild or re-embed the graph first."
+            )
+        raise EmbeddingError(
+            "Graph embedding provider mismatch. "
+            f"Graph was built with {graph_info['provider_id']}, current provider is {current.provider_id}. "
+            "Rebuild or re-embed the graph before searching or appending text."
+        )
+
+    def _is_graph_embedding_compatible(self, graph_info: Dict[str, Any]) -> bool:
+        current = self._embedding.info
+        provider_id = graph_info.get("provider_id")
+        if provider_id:
+            return provider_id == current.provider_id
+        legacy_provider_id = "ollama:nomic-embed-text:768"
+        return current.provider_id == legacy_provider_id
+
     # ----------------------------------------------------------------
     # Add data (NER → nodes/edges)
     # ----------------------------------------------------------------
 
     def add_text(self, graph_id: str, text: str) -> str:
         """Process text: NER/RE → batch embed → create nodes/edges → return episode_id."""
+        self._assert_embedding_compatible(graph_id)
         episode_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
 
@@ -202,8 +495,10 @@ class Neo4jStorage(GraphStorage):
             try:
                 all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
             except Exception as e:
-                logger.warning(f"[add_text] Batch embedding failed, falling back to empty: {e}")
-                all_embeddings = [[] for _ in all_texts_to_embed]
+                raise EmbeddingError(
+                    "Batch embedding failed. Graph build stopped to avoid storing empty vectors. "
+                    f"Provider={self._embedding.provider_id()} Error={e}"
+                ) from e
 
         entity_embeddings = all_embeddings[:len(entities)]
         relation_embeddings = all_embeddings[len(entities):]
@@ -489,6 +784,7 @@ class Neo4jStorage(GraphStorage):
         Returns a dict with 'edges' and/or 'nodes' lists
         (callers like zep_tools will wrap into SearchResult).
         """
+        self._assert_embedding_compatible(graph_id)
         result = {"edges": [], "nodes": [], "query": query}
 
         with self._driver.session() as session:

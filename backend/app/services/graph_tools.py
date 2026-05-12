@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..storage import GraphStorage
+from ..config import Config
 
 logger = get_logger('mirofish.graph_tools')
 
@@ -29,6 +30,7 @@ class SearchResult:
     nodes: List[Dict[str, Any]]
     query: str
     total_count: int
+    warning: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -36,12 +38,15 @@ class SearchResult:
             "edges": self.edges,
             "nodes": self.nodes,
             "query": self.query,
-            "total_count": self.total_count
+            "total_count": self.total_count,
+            "warning": self.warning,
         }
 
     def to_text(self) -> str:
         """Convert to text format for LLM understanding"""
         text_parts = [f"Search Query: {self.query}", f"Found {self.total_count} related results"]
+        if self.warning:
+            text_parts.append(f"Warning: {self.warning}")
 
         if self.facts:
             text_parts.append("\n### Related Facts:")
@@ -492,15 +497,20 @@ class GraphToolsService:
             )
 
         except Exception as e:
-            logger.warning(f"Graph search failed, degrading to local search: {str(e)}")
-            return self._local_search(graph_id, query, limit, scope)
+            warning = (
+                "Vector search is unavailable; degraded to keyword-only local search. "
+                f"Reason: {str(e)}"
+            )
+            logger.warning(warning)
+            return self._local_search(graph_id, query, limit, scope, warning=warning)
 
     def _local_search(
         self,
         graph_id: str,
         query: str,
         limit: int = 10,
-        scope: str = "edges"
+        scope: str = "edges",
+        warning: Optional[str] = None,
     ) -> SearchResult:
         """
         Local keyword matching search (fallback approach)
@@ -580,7 +590,8 @@ class GraphToolsService:
             edges=edges_result,
             nodes=nodes_result,
             query=query,
-            total_count=len(facts)
+            total_count=len(facts),
+            warning=warning,
         )
 
     def get_all_nodes(self, graph_id: str) -> List[NodeInfo]:
@@ -1166,7 +1177,7 @@ Return the sub-questions as a JSON list."""
                 simulation_id=simulation_id,
                 interviews=interviews_request,
                 platform=None,
-                timeout=180.0
+                timeout=Config.REPORT_AGENT_INTERVIEW_TIMEOUT
             )
 
             logger.info(f"Interview API returned: {api_result.get('interviews_count', 0)} results, success={api_result.get('success')}")

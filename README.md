@@ -123,11 +123,22 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=mirofish
 
 # Embeddings
+EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_BASE_URL=http://localhost:11434
+EMBEDDING_DIMENSIONS=768
 ```
 
 Works with any OpenAI-compatible API — swap Ollama for Claude, GPT, or any other provider by changing `LLM_BASE_URL` and `LLM_API_KEY`.
+Embeddings default to local Ollama. To benchmark Gemini, set `EMBEDDING_PROVIDER=gemini`, `GEMINI_API_KEY`, and `GEMINI_EMBEDDING_MODEL=gemini-embedding-2`; rebuild or re-embed graphs before searching with a different embedding provider.
+
+Runtime readiness is exposed at `GET /api/status`. It reports Neo4j health, LLM configuration, embedding health, and whether vector search is usable.
+
+Run the embedding benchmark from `backend/`:
+
+```bash
+uv run python scripts/benchmark_embeddings.py --providers ollama gemini --graph-id <graph_id>
+```
 
 ## Architecture
 

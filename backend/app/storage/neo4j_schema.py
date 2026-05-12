@@ -20,6 +20,8 @@ CREATE CONSTRAINT episode_uuid IF NOT EXISTS
 FOR (ep:Episode) REQUIRE ep.uuid IS UNIQUE
 """
 
+VECTOR_DIMENSIONS = 768
+
 # Vector indexes (Neo4j 5.11+)
 CREATE_ENTITY_VECTOR_INDEX = """
 CREATE VECTOR INDEX entity_embedding IF NOT EXISTS

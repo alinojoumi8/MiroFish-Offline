@@ -574,6 +574,42 @@ def get_graph_data(graph_id: str):
         }), 500
 
 
+@graph_bp.route('/<graph_id>/embedding-status', methods=['GET'])
+def get_graph_embedding_status(graph_id: str):
+    """Return embedding coverage and report readiness for a graph."""
+    try:
+        storage = _get_storage()
+        return jsonify({
+            "success": True,
+            "data": storage.get_embedding_status(graph_id)
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@graph_bp.route('/<graph_id>/reembed', methods=['POST'])
+def reembed_graph(graph_id: str):
+    """Backfill missing graph embeddings with the active embedding provider."""
+    try:
+        data = request.get_json(silent=True) or {}
+        batch_size = int(data.get('batch_size', 32))
+        storage = _get_storage()
+        return jsonify({
+            "success": True,
+            "data": storage.reembed_graph(graph_id, batch_size=batch_size)
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
 def delete_graph(graph_id: str):
     """

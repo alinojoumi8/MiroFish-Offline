@@ -450,6 +450,7 @@ class Report:
     created_at: str = ""
     completed_at: str = ""
     error: Optional[str] = None
+    validation_issues: List[Dict[str, Any]] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -462,7 +463,8 @@ class Report:
             "markdown_content": self.markdown_content,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
-            "error": self.error
+            "error": self.error,
+            "validation_issues": self.validation_issues,
         }
 
 
@@ -1713,6 +1715,13 @@ class ReportAgent:
             
             # Using ReportManagerassembleComplete report
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
+            report.validation_issues = ReportManager.validate_report_output(report)
+            blocking_issues = [issue for issue in report.validation_issues if issue.get("blocking")]
+            if blocking_issues:
+                raise ValueError(
+                    "Report output validation failed: "
+                    + "; ".join(issue["message"] for issue in blocking_issues)
+                )
             report.status = ReportStatus.COMPLETED
             report.completed_at = datetime.now().isoformat()
             
@@ -2449,6 +2458,34 @@ class ReportManager:
                 f.write(report.markdown_content)
         
         logger.info(f"reportsaved: {report.report_id}")
+
+    @staticmethod
+    def validate_report_output(report: Report) -> List[Dict[str, Any]]:
+        """Detect degraded or malformed report output before marking complete."""
+        content = report.markdown_content or ""
+        issues: List[Dict[str, Any]] = []
+        if re.search(r"<tool_call\b", content, flags=re.IGNORECASE):
+            issues.append({
+                "code": "raw_tool_call",
+                "severity": "error",
+                "blocking": True,
+                "message": "Report contains a raw <tool_call> block instead of final prose.",
+            })
+        if "Interview API call failed" in content or "No successful interviews" in content:
+            issues.append({
+                "code": "failed_interview",
+                "severity": "warning",
+                "blocking": False,
+                "message": "Report content includes failed interview output.",
+            })
+        if "Vector search is unavailable" in content or "degraded to keyword-only" in content:
+            issues.append({
+                "code": "degraded_retrieval",
+                "severity": "warning",
+                "blocking": False,
+                "message": "Report content includes degraded retrieval warnings.",
+            })
+        return issues
     
     @classmethod
     def get_report(cls, report_id: str) -> Optional[Report]:
@@ -2500,7 +2537,8 @@ class ReportManager:
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),
             completed_at=data.get('completed_at', ''),
-            error=data.get('error')
+            error=data.get('error'),
+            validation_issues=data.get('validation_issues', []),
         )
     
     @classmethod
