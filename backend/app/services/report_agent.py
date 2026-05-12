@@ -399,11 +399,13 @@ class ReportSection:
     """Report section"""
     title: str
     content: str = ""
+    description: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "title": self.title,
-            "content": self.content
+            "content": self.content,
+            "description": self.description,
         }
 
     def to_markdown(self, level: int = 2) -> str:
@@ -623,6 +625,9 @@ Prediction Scenario (Simulation Requirement): {simulation_requirement}
 
 Current Section to Write: {section_title}
 
+Current Section Assignment:
+{section_role}
+
 ═══════════════════════════════════════════════════════════════
 [Core Concept]
 ═══════════════════════════════════════════════════════════════
@@ -666,6 +671,18 @@ Your task is to:
    - Report content must reflect simulation results that represent the future in the simulated world
    - Don't add information that doesn't exist in the simulation
    - If information is insufficient in some aspects, state it truthfully
+
+5. [Synthesis, Not Meta-Commentary]
+   - Do not write phrases like "the simulation captured", "the simulation recorded", "the simulation revealed", or "the simulation found"
+   - State the analytical conclusion directly
+   - Bad: "The simulation revealed that 88% of users defected"
+   - Good: "The strongest projected user-flow signal is an 88% defection rate toward Duolingo"
+
+6. [Evidence Diversity and Anti-Repetition]
+   - Each section must use at least 3 distinct evidence points when available
+   - Do not reuse the same headline facts, numbers, quotes, or named examples that prior sections already used
+   - If a fact must appear again, add a new implication instead of restating it
+   - Do not build an entire section from one evidence point unless retrieved data is truly sparse
 
 ═══════════════════════════════════════════════════════════════
 [⚠️ Format Specification - Extremely Important!]
@@ -773,6 +790,9 @@ SECTION_USER_PROMPT_TEMPLATE = """\
 Completed Section Content (Please Read Carefully to Avoid Duplication):
 {previous_content}
 
+Already Used Evidence Ledger (avoid repeating these facts unless adding a new implication):
+{used_evidence_ledger}
+
 ═══════════════════════════════════════════════════════════════
 [Current Task] Write Section: {section_title}
 ═══════════════════════════════════════════════════════════════
@@ -782,6 +802,8 @@ Completed Section Content (Please Read Carefully to Avoid Duplication):
 2. You must call tools to get simulation data before starting
 3. Please mix different tools, don't use only one
 4. Report content must come from retrieval results, don't use your own knowledge
+5. Use the Current Section Assignment as the section's job; don't drift into another section's job
+6. Prefer unused facts and fresh implications over repeating the evidence ledger
 
 [⚠️ Format Warning - Must Follow]
 - ❌ Don't write any titles (#, ##, ###, #### none allowed)
@@ -1199,6 +1221,7 @@ class ReportAgent:
             for section_data in response.get("sections", []):
                 sections.append(ReportSection(
                     title=section_data.get("title", ""),
+                    description=section_data.get("description", ""),
                     content=""
                 ))
             
@@ -1226,6 +1249,75 @@ class ReportAgent:
                     ReportSection(title="Trend Outlook and Risk Warning")
                 ]
             )
+
+    def _build_section_role(
+        self,
+        section: ReportSection,
+        outline: ReportOutline,
+        section_index: int,
+    ) -> str:
+        """Return a concrete writing job so sections do not collapse into repeats."""
+        title = section.title.lower()
+        description = section.description.strip()
+        role_parts = []
+        if description:
+            role_parts.append(f"Planned focus: {description}")
+
+        if section_index <= 1:
+            role_parts.append(
+                "Job: establish the core outcome and only the minimum facts needed to frame the report."
+            )
+        elif any(word in title for word in ["competitor", "competitive", "duolingo", "babbel", "market"]):
+            role_parts.append(
+                "Job: analyze competitive positioning, response options, and why rival actions matter."
+            )
+        elif any(word in title for word in ["adoption", "conversion", "pricing", "revenue", "customer"]):
+            role_parts.append(
+                "Job: quantify adoption, pricing, revenue, and customer behavior without drifting into competitor narrative."
+            )
+        elif any(word in title for word in ["founder", "company", "team", "operator", "strategy"]):
+            role_parts.append(
+                "Job: explain company and leadership behavior, operational choices, and execution constraints."
+            )
+        elif any(word in title for word in ["risk", "outcome", "future", "vulnerab", "shutdown"]):
+            role_parts.append(
+                "Job: synthesize what changes the forecast, downside risks, and decision points."
+            )
+        else:
+            role_parts.append(
+                "Job: add a new analytical angle that is not covered by earlier or later section titles."
+            )
+
+        other_titles = [s.title for s in outline.sections if s.title != section.title]
+        if other_titles:
+            role_parts.append("Do not take over these other section jobs: " + "; ".join(other_titles))
+        return "\n".join(role_parts)
+
+    def _build_used_evidence_ledger(self, previous_sections: List[str], max_items: int = 12) -> str:
+        """Extract reused-risk facts from completed sections for prompt-level de-duplication."""
+        if not previous_sections:
+            return "(No prior evidence used yet.)"
+
+        evidence: List[str] = []
+        seen = set()
+        combined = "\n".join(previous_sections)
+        quoted = re.findall(r'>\s*"([^"]{20,220})"', combined)
+        candidates = quoted + ReportManager._extract_report_sentences(combined)
+
+        for item in candidates:
+            normalized = ReportManager._normalize_fact(item)
+            if not normalized or normalized in seen:
+                continue
+            if not ReportManager._looks_like_specific_evidence(item):
+                continue
+            seen.add(normalized)
+            evidence.append(item.strip())
+            if len(evidence) >= max_items:
+                break
+
+        if not evidence:
+            return "(No specific prior evidence detected.)"
+        return "\n".join(f"- {item}" for item in evidence)
     
     def _generate_section_react(
         self, 
@@ -1266,6 +1358,7 @@ class ReportAgent:
             report_summary=outline.summary,
             simulation_requirement=self.simulation_requirement,
             section_title=section.title,
+            section_role=self._build_section_role(section, outline, section_index),
             tools_description=self._get_tools_description(),
         )
 
@@ -1282,6 +1375,7 @@ class ReportAgent:
         
         user_prompt = SECTION_USER_PROMPT_TEMPLATE.format(
             previous_content=previous_content,
+            used_evidence_ledger=self._build_used_evidence_ledger(previous_sections),
             section_title=section.title,
         )
 
@@ -1400,6 +1494,7 @@ class ReportAgent:
 
                 # Normal completion
                 final_answer = response.split("Final Answer:")[-1].strip()
+                final_answer = ReportManager._clean_section_content(final_answer, section.title)
                 logger.info(f"Section {section.title} generation completed (tool calls: {tool_calls_count}times)")
 
                 if self.report_logger:
@@ -1499,6 +1594,7 @@ class ReportAgent:
             # directlyconvertthis contentas finalanswer, no more waiting
             logger.info(f"Section {section.title} did not detectto 'Final Answer:' prefix, directlyadoptLLM outputas finalcontent（Tool call: {tool_calls_count}times)")
             final_answer = response.strip()
+            final_answer = ReportManager._clean_section_content(final_answer, section.title)
 
             if self.report_logger:
                 self.report_logger.log_section_content(
@@ -1527,6 +1623,7 @@ class ReportAgent:
             final_answer = response.split("Final Answer:")[-1].strip()
         else:
             final_answer = response
+        final_answer = ReportManager._clean_section_content(final_answer, section.title)
         
         # Log sectioncontentgeneratecompletion log
         if self.report_logger:
@@ -2195,6 +2292,11 @@ class ReportManager:
             if skip_next_empty and stripped == '':
                 skip_next_empty = False
                 continue
+
+            # Remove stray markdown emphasis markers left as standalone artifacts.
+            if stripped in {"*", "**", "***", "__", "___"}:
+                skip_next_empty = True
+                continue
             
             skip_next_empty = False
             cleaned_lines.append(line)
@@ -2459,8 +2561,8 @@ class ReportManager:
         
         logger.info(f"reportsaved: {report.report_id}")
 
-    @staticmethod
-    def validate_report_output(report: Report) -> List[Dict[str, Any]]:
+    @classmethod
+    def validate_report_output(cls, report: Report) -> List[Dict[str, Any]]:
         """Detect degraded or malformed report output before marking complete."""
         content = report.markdown_content or ""
         issues: List[Dict[str, Any]] = []
@@ -2485,7 +2587,79 @@ class ReportManager:
                 "blocking": False,
                 "message": "Report content includes degraded retrieval warnings.",
             })
+        repeated_facts = cls._find_repeated_facts(content)
+        if repeated_facts:
+            issues.append({
+                "code": "repeated_fact",
+                "severity": "warning",
+                "blocking": False,
+                "message": f"Report repeats the same fact across sections: {repeated_facts[0]}",
+                "examples": repeated_facts[:5],
+            })
+        meta_count = len(re.findall(
+            r"\bthe simulation\s+(captured|recorded|revealed|found|shows|showed|demonstrates|demonstrated)\b",
+            content,
+            flags=re.IGNORECASE,
+        ))
+        if meta_count:
+            issues.append({
+                "code": "meta_commentary",
+                "severity": "warning",
+                "blocking": False,
+                "message": "Report uses meta-commentary instead of direct analysis.",
+                "count": meta_count,
+            })
         return issues
+
+    @staticmethod
+    def _extract_report_sections(content: str) -> List[str]:
+        parts = re.split(r"(?m)^##\s+.+$", content or "")
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _extract_report_sentences(content: str) -> List[str]:
+        sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", content or "").strip())
+        return [
+            sentence.strip().strip('"')
+            for sentence in sentences
+            if len(sentence.strip()) >= 45
+        ]
+
+    @staticmethod
+    def _normalize_fact(text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9%$.\s-]", "", (text or "").lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    @staticmethod
+    def _looks_like_specific_evidence(text: str) -> bool:
+        if re.search(r"(\d|%|\$)", text or ""):
+            return True
+        capitalized_terms = re.findall(r"\b[A-Z][A-Za-z0-9&.-]{2,}\b", text or "")
+        return len(capitalized_terms) >= 2
+
+    @classmethod
+    def _find_repeated_facts(cls, content: str) -> List[str]:
+        seen_by_section: Dict[str, set] = {}
+        examples: Dict[str, str] = {}
+        for section_index, section in enumerate(cls._extract_report_sections(content)):
+            section_seen = set()
+            for sentence in cls._extract_report_sentences(section):
+                if not cls._looks_like_specific_evidence(sentence):
+                    continue
+                normalized = cls._normalize_fact(sentence)
+                if not normalized:
+                    continue
+                section_seen.add(normalized)
+                examples.setdefault(normalized, sentence)
+            for normalized in section_seen:
+                seen_by_section.setdefault(normalized, set()).add(section_index)
+
+        return [
+            examples[normalized]
+            for normalized, section_indexes in seen_by_section.items()
+            if len(section_indexes) > 1
+        ]
     
     @classmethod
     def get_report(cls, report_id: str) -> Optional[Report]:
@@ -2511,7 +2685,8 @@ class ReportManager:
             for s in outline_data.get('sections', []):
                 sections.append(ReportSection(
                     title=s['title'],
-                    content=s.get('content', '')
+                    content=s.get('content', ''),
+                    description=s.get('description', ''),
                 ))
             outline = ReportOutline(
                 title=outline_data['title'],
