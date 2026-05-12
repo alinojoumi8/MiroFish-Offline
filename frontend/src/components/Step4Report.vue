@@ -32,6 +32,22 @@
                 <span class="section-number">{{ String(idx + 1).padStart(2, '0') }}</span>
                 <h3 class="section-title">{{ section.title }}</h3>
                 <span v-if="section.evidence_cards?.length" class="evidence-count mono">{{ section.evidence_cards.length }} evidence</span>
+                <div v-if="isSectionCompleted(idx + 1)" class="section-actions">
+                  <button
+                    class="section-action-btn"
+                    :disabled="regeneratingSection === idx + 1"
+                    @click.stop="regenerateSection(idx + 1, {})"
+                  >
+                    {{ regeneratingSection === idx + 1 ? 'Rerunning...' : 'Rerun' }}
+                  </button>
+                  <button
+                    class="section-action-btn"
+                    :disabled="regeneratingSection === idx + 1"
+                    @click.stop="regenerateSection(idx + 1, { disable_interviews: true })"
+                  >
+                    No interviews
+                  </button>
+                </div>
                 <svg 
                   v-if="isSectionCompleted(idx + 1)" 
                   class="collapse-icon" 
@@ -418,7 +434,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { generateReport, getAgentLog, getConsoleLog, getReport, getReportProgress } from '../api/report'
+import { generateReport, getAgentLog, getConsoleLog, getReport, getReportProgress, regenerateReportSection } from '../api/report'
 import { reembedGraph } from '../api/graph'
 
 const router = useRouter()
@@ -457,6 +473,7 @@ const reportSimulationId = ref(props.simulationId || null)
 const reportGraphId = ref(null)
 const isRepairing = ref(false)
 const isRegenerating = ref(false)
+const regeneratingSection = ref(null)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -1913,6 +1930,39 @@ const regenerateReport = async (options = {}) => {
   }
 }
 
+const refreshReportState = async () => {
+  agentLogs.value = []
+  consoleLogs.value = []
+  agentLogLine.value = 0
+  consoleLogLine.value = 0
+  generatedSections.value = {}
+  reportOutline.value = null
+  await fetchReportSnapshot()
+  await fetchAgentLog()
+  await fetchConsoleLog()
+}
+
+const regenerateSection = async (sectionIndex, options = {}) => {
+  if (!props.reportId || regeneratingSection.value) return
+  regeneratingSection.value = sectionIndex
+  try {
+    const payload = {
+      strict_antirepetition: true,
+      ...options
+    }
+    addLog(`Regenerating section ${sectionIndex}: ${JSON.stringify(payload)}`)
+    const res = await regenerateReportSection(props.reportId, sectionIndex, payload)
+    if (res.success) {
+      addLog(`Section ${sectionIndex} regenerated`)
+      await refreshReportState()
+    }
+  } catch (err) {
+    addLog(`Section regeneration failed: ${err.message}`)
+  } finally {
+    regeneratingSection.value = null
+  }
+}
+
 const isSectionCompleted = (sectionIndex) => {
   return !!generatedSections.value[sectionIndex]
 }
@@ -2125,7 +2175,7 @@ const fetchAgentLog = async () => {
 
           // section_complete - Section generation complete
           if (log.action === 'section_complete') {
-            if (log.details?.content) {
+            if (log.details?.content && !generatedSections.value[log.section_index]) {
               generatedSections.value[log.section_index] = log.details.content
               // Auto-expand the newly generated section
               expandedContent.value.add(log.section_index - 1)
@@ -2180,8 +2230,18 @@ const fetchReportSnapshot = async () => {
       reportQuality.value = report.quality_score || null
       reportSimulationId.value = report.simulation_id || reportSimulationId.value
       reportGraphId.value = report.graph_id || reportGraphId.value
-      if (report.outline && !reportOutline.value) {
+      if (report.outline) {
         reportOutline.value = report.outline
+        const savedSections = {}
+        report.outline.sections?.forEach((section, idx) => {
+          if (section.content) {
+            savedSections[idx + 1] = `## ${section.title}\n\n${section.content}`
+          }
+        })
+        generatedSections.value = {
+          ...generatedSections.value,
+          ...savedSections
+        }
       }
       if (['completed', 'needs_review'].includes(report.status)) {
         isComplete.value = true
@@ -2578,7 +2638,7 @@ watch(() => props.reportId, (newId) => {
 }
 
 .collapse-icon {
-  margin-left: auto;
+  margin-left: 0;
   color: #9CA3AF;
   transition: transform 0.3s ease;
   flex-shrink: 0;
@@ -2615,6 +2675,35 @@ watch(() => props.reportId, (newId) => {
   padding: 3px 8px;
   white-space: nowrap;
   align-self: center;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.section-action-btn {
+  border: 1px solid #D1D5DB;
+  background: #FFFFFF;
+  color: #374151;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.section-action-btn:hover:not(:disabled) {
+  background: #F9FAFB;
+  border-color: #9CA3AF;
+}
+
+.section-action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* States */

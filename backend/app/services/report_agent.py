@@ -1913,6 +1913,108 @@ class ReportAgent:
                 self.console_logger = None
             
             return report
+
+    def regenerate_section(
+        self,
+        report: Report,
+        section_index: int,
+        disable_interviews: Optional[bool] = None,
+        strict_antirepetition: Optional[bool] = None,
+    ) -> Report:
+        """Regenerate one section and reassemble the report."""
+        if not report.outline:
+            raise ValueError("Report has no outline; cannot regenerate a section")
+        if section_index < 1 or section_index > len(report.outline.sections):
+            raise ValueError(f"Section index out of range: {section_index}")
+
+        old_disable_interviews = self.disable_interviews
+        old_strict_antirepetition = self.strict_antirepetition
+        if disable_interviews is not None:
+            self.disable_interviews = disable_interviews
+        if strict_antirepetition is not None:
+            self.strict_antirepetition = strict_antirepetition
+        self.tools = self._define_tools()
+
+        try:
+            self.report_logger = ReportLogger(report.report_id)
+            self.console_logger = ReportConsoleLogger(report.report_id)
+            section = report.outline.sections[section_index - 1]
+            self.report_logger.log(
+                action="section_regenerate_start",
+                stage="generating",
+                section_title=section.title,
+                section_index=section_index,
+                details={
+                    "message": f"Started regenerating section: {section.title}",
+                    "disable_interviews": self.disable_interviews,
+                    "strict_antirepetition": self.strict_antirepetition,
+                },
+            )
+            ReportManager.update_progress(
+                report.report_id,
+                "generating",
+                75,
+                f"regenerating section {section_index}: {section.title}",
+                current_section=section.title,
+                completed_sections=[s.title for s in report.outline.sections if s.content],
+            )
+            previous_sections = [
+                item["content"]
+                for item in ReportManager.get_generated_sections(report.report_id)
+                if item["section_index"] < section_index
+            ]
+            section.content = self._generate_section_react(
+                section=section,
+                outline=report.outline,
+                previous_sections=previous_sections,
+                section_index=section_index,
+            )
+            ReportManager.save_section(report.report_id, section_index, section)
+            ReportManager.save_outline(report.report_id, report.outline)
+            self.report_logger.log_section_full_complete(
+                section_title=section.title,
+                section_index=section_index,
+                full_content=f"## {section.title}\n\n{section.content}".strip(),
+            )
+
+            report.markdown_content = ReportManager.assemble_full_report(report.report_id, report.outline)
+            report.validation_issues = ReportManager.validate_report_output(report)
+            blocking_issues = [issue for issue in report.validation_issues if issue.get("blocking")]
+            if blocking_issues:
+                raise ValueError(
+                    "Report output validation failed: "
+                    + "; ".join(issue["message"] for issue in blocking_issues)
+                )
+            report.quality_score = ReportManager.evaluate_report_quality(report)
+            ReportManager.apply_quality_status(report)
+            report.completed_at = datetime.now().isoformat()
+            ReportManager.save_report(report)
+            ReportManager.update_progress(
+                report.report_id,
+                report.status.value,
+                100,
+                f"section {section_index} regenerated",
+                completed_sections=[s.title for s in report.outline.sections],
+            )
+            return report
+        except Exception as e:
+            if self.report_logger:
+                self.report_logger.log_error(str(e), "failed")
+            ReportManager.update_progress(
+                report.report_id,
+                "failed",
+                -1,
+                f"section regeneration failed: {str(e)}",
+                completed_sections=[s.title for s in report.outline.sections if s.content],
+            )
+            raise
+        finally:
+            if self.console_logger:
+                self.console_logger.close()
+                self.console_logger = None
+            self.disable_interviews = old_disable_interviews
+            self.strict_antirepetition = old_strict_antirepetition
+            self.tools = self._define_tools()
     
     def chat(
         self, 

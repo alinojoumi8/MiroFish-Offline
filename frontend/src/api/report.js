@@ -51,6 +51,20 @@ export const getReport = (reportId) => {
 }
 
 /**
+ * Regenerate one report section
+ * @param {string} reportId
+ * @param {number} sectionIndex
+ * @param {Object} data - { disable_interviews?, strict_antirepetition? }
+ */
+export const regenerateReportSection = (reportId, sectionIndex, data = {}) => {
+  return requestWithRetry(
+    () => service.post(`/api/report/${reportId}/section/${sectionIndex}/regenerate`, data),
+    1,
+    1000
+  )
+}
+
+/**
  * Chat with Report Agent
  * @param {Object} data - { simulation_id, message, chat_history? }
  */

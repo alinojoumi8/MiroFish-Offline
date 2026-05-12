@@ -20,6 +20,16 @@ from ..utils.logger import get_logger
 logger = get_logger('mirofish.api.report')
 
 
+def _json_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 # ============== Report Generation Interface ==============
 
 @report_bp.route('/generate', methods=['POST'])
@@ -80,10 +90,10 @@ def generate_report():
         # (current_app is not available inside background threads)
         storage = current_app.extensions.get('neo4j_storage')
         if not storage:
-            return jsonify({"success": False, "error": "GraphStorage not initialized — check Neo4j connection"}), 500
+            return jsonify({"success": False, "error": "GraphStorage not initialized - check Neo4j connection"}), 500
 
         embedding_status = storage.get_embedding_status(graph_id)
-        allow_degraded = bool(data.get("allow_degraded", False))
+        allow_degraded = _json_bool(data.get("allow_degraded"), False)
         if not embedding_status.get("safe_to_report") and not allow_degraded:
             return jsonify({
                 "success": False,
@@ -105,8 +115,8 @@ def generate_report():
                     simulation_id=simulation_id,
                     simulation_requirement=simulation_requirement,
                     graph_tools=graph_tools,
-                    disable_interviews=bool(data.get("disable_interviews", False)),
-                    strict_antirepetition=bool(data.get("strict_antirepetition", False)),
+                    disable_interviews=_json_bool(data.get("disable_interviews"), False),
+                    strict_antirepetition=_json_bool(data.get("strict_antirepetition"), False),
                 )
                 def progress_callback(stage, progress, message):
                     task_manager.update_task(task_id, progress=progress, message=f"[{stage}] {message}")
@@ -335,6 +345,41 @@ def get_single_section(report_id: str, section_index: int):
         return jsonify({"success": True, "data": {"filename": f"section_{section_index:02d}.md", "content": content}})
     except Exception as e:
         logger.error(f"Failed to get section content: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@report_bp.route('/<report_id>/section/<int:section_index>/regenerate', methods=['POST'])
+def regenerate_report_section(report_id: str, section_index: int):
+    try:
+        data = request.get_json() or {}
+        report = ReportManager.get_report(report_id)
+        if not report:
+            return jsonify({"success": False, "error": f"Report does not exist: {report_id}"}), 404
+
+        storage = current_app.extensions.get('neo4j_storage')
+        if not storage:
+            raise ValueError("GraphStorage not initialized - check Neo4j connection")
+
+        disable_interviews = _json_bool(data.get("disable_interviews"), False)
+        strict_antirepetition = _json_bool(data.get("strict_antirepetition"), True)
+
+        agent = ReportAgent(
+            graph_id=report.graph_id,
+            simulation_id=report.simulation_id,
+            simulation_requirement=report.simulation_requirement,
+            graph_tools=GraphToolsService(storage=storage),
+            disable_interviews=disable_interviews,
+            strict_antirepetition=strict_antirepetition,
+        )
+        updated_report = agent.regenerate_section(
+            report=report,
+            section_index=section_index,
+            disable_interviews=disable_interviews,
+            strict_antirepetition=strict_antirepetition,
+        )
+        return jsonify({"success": True, "data": updated_report.to_dict()})
+    except Exception as e:
+        logger.error(f"Failed to regenerate section: {str(e)}")
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
