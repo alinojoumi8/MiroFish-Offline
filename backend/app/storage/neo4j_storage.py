@@ -323,6 +323,146 @@ class Neo4jStorage(GraphStorage):
             "issues": issues,
         }
 
+    def get_graph_quality(self, graph_id: str) -> Dict[str, Any]:
+        """Score whether the graph is structurally rich enough for report synthesis."""
+        embedding_status = self.get_embedding_status(graph_id)
+
+        with self._driver.session() as session:
+            node_record = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                RETURN count(n) AS total,
+                       sum(CASE
+                           WHEN coalesce(trim(n.summary), '') = ''
+                           THEN 1 ELSE 0 END) AS empty_summaries
+                """,
+                gid=graph_id,
+            ).single()
+            isolated_record = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                WHERE NOT (n)-[:RELATION]-()
+                RETURN count(n) AS isolated
+                """,
+                gid=graph_id,
+            ).single()
+            rel_record = session.run(
+                """
+                MATCH ()-[r:RELATION {graph_id: $gid}]->()
+                RETURN count(r) AS total,
+                       count(DISTINCT coalesce(r.name, '')) AS relation_type_count,
+                       sum(CASE
+                           WHEN coalesce(trim(r.fact), '') = ''
+                           THEN 1 ELSE 0 END) AS empty_facts
+                """,
+                gid=graph_id,
+            ).single()
+            type_record = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                UNWIND labels(n) AS lbl
+                WITH lbl WHERE lbl <> 'Entity'
+                RETURN count(DISTINCT lbl) AS entity_type_count
+                """,
+                gid=graph_id,
+            ).single()
+            duplicate_record = session.run(
+                """
+                MATCH (n:Entity {graph_id: $gid})
+                WITH coalesce(n.name_lower, toLower(n.name), '') AS key, count(n) AS count
+                WHERE key <> '' AND count > 1
+                RETURN count(*) AS duplicate_name_groups, sum(count) AS duplicate_nodes
+                """,
+                gid=graph_id,
+            ).single()
+            episode_record = session.run(
+                """
+                MATCH (e:Episode {graph_id: $gid})
+                RETURN count(e) AS episode_count
+                """,
+                gid=graph_id,
+            ).single()
+
+        node_count = int(node_record["total"] or 0)
+        edge_count = int(rel_record["total"] or 0)
+        empty_summaries = int(node_record["empty_summaries"] or 0)
+        empty_facts = int(rel_record["empty_facts"] or 0)
+        isolated_nodes = int(isolated_record["isolated"] or 0)
+        entity_type_count = int(type_record["entity_type_count"] or 0)
+        relation_type_count = int(rel_record["relation_type_count"] or 0)
+        duplicate_name_groups = int(duplicate_record["duplicate_name_groups"] or 0)
+        duplicate_nodes = int(duplicate_record["duplicate_nodes"] or 0)
+        episode_count = int(episode_record["episode_count"] or 0)
+
+        relation_density = edge_count / node_count if node_count else 0.0
+        isolated_ratio = isolated_nodes / node_count if node_count else 0.0
+        empty_summary_ratio = empty_summaries / node_count if node_count else 0.0
+        empty_fact_ratio = empty_facts / edge_count if edge_count else 0.0
+
+        deductions: List[Dict[str, Any]] = []
+
+        def deduct(points: int, code: str, message: str):
+            deductions.append({"points": points, "code": code, "message": message})
+
+        if node_count == 0:
+            deduct(40, "no_entities", "Graph has no entities.")
+        elif node_count < 5:
+            deduct(18, "low_entity_count", f"Only {node_count} entities were extracted.")
+
+        if edge_count == 0:
+            deduct(32, "no_relationships", "Graph has no relationships.")
+        elif edge_count < 3:
+            deduct(14, "low_relationship_count", f"Only {edge_count} relationships were extracted.")
+
+        if node_count and relation_density < 0.5:
+            deduct(12, "low_relation_density", f"Relation density is {relation_density:.2f} edges per entity.")
+
+        if isolated_ratio > 0.35:
+            deduct(12, "high_isolated_nodes", f"{isolated_nodes}/{node_count} entities are isolated.")
+
+        if empty_summary_ratio > 0:
+            deduct(8, "empty_entity_summaries", f"{empty_summaries}/{node_count} entities have empty summaries.")
+
+        if empty_fact_ratio > 0:
+            deduct(8, "empty_relationship_facts", f"{empty_facts}/{edge_count} relationships have empty facts.")
+
+        if node_count >= 5 and entity_type_count < 2:
+            deduct(6, "low_entity_type_diversity", "Graph uses fewer than two entity types.")
+
+        if edge_count >= 3 and relation_type_count < 2:
+            deduct(6, "low_relation_type_diversity", "Graph uses fewer than two relationship types.")
+
+        if duplicate_name_groups:
+            deduct(6, "duplicate_entity_names", f"{duplicate_nodes} entities share duplicate normalized names.")
+
+        score = max(0, 100 - sum(item["points"] for item in deductions))
+        status = "pass"
+        if score < 50:
+            status = "fail"
+        elif score < 75:
+            status = "warn"
+
+        return {
+            "graph_id": graph_id,
+            "score": score,
+            "status": status,
+            "safe_to_report": bool(embedding_status.get("safe_to_report") and score >= 50),
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "episode_count": episode_count,
+            "entity_type_count": entity_type_count,
+            "relation_type_count": relation_type_count,
+            "relation_density": relation_density,
+            "isolated_nodes": isolated_nodes,
+            "isolated_ratio": isolated_ratio,
+            "empty_summaries": empty_summaries,
+            "empty_facts": empty_facts,
+            "duplicate_name_groups": duplicate_name_groups,
+            "duplicate_nodes": duplicate_nodes,
+            "embedding": embedding_status,
+            "deductions": deductions,
+        }
+
     def reembed_graph(self, graph_id: str, batch_size: int = 32) -> Dict[str, Any]:
         """Backfill entity and relationship embeddings for a graph."""
         status = self.get_embedding_status(graph_id)

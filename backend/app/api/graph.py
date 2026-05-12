@@ -591,6 +591,23 @@ def get_graph_embedding_status(graph_id: str):
         }), 500
 
 
+@graph_bp.route('/<graph_id>/quality', methods=['GET'])
+def get_graph_quality(graph_id: str):
+    """Return structural graph quality and synthesis readiness."""
+    try:
+        storage = _get_storage()
+        return jsonify({
+            "success": True,
+            "data": storage.get_graph_quality(graph_id)
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @graph_bp.route('/<graph_id>/reembed', methods=['POST'])
 def reembed_graph(graph_id: str):
     """Backfill missing graph embeddings with the active embedding provider."""

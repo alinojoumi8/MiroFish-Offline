@@ -132,6 +132,11 @@
             <span v-if="reportProgress?.is_stale" class="quality-note">No heartbeat for {{ reportProgress.seconds_since_update }}s</span>
           </div>
 
+          <div v-if="graphQuality" class="quality-strip" :class="`quality-strip--${graphQualityStatusClass}`">
+            <span class="quality-score mono">Graph {{ graphQuality.score }}/100</span>
+            <span class="quality-note">{{ graphQualitySummary }}</span>
+          </div>
+
           <div class="operator-actions">
             <button class="operator-btn" :disabled="!reportGraphId || isRepairing" @click="repairEmbeddings">
               {{ isRepairing ? 'Repairing...' : 'Repair embeddings' }}
@@ -435,7 +440,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { generateReport, getAgentLog, getConsoleLog, getReport, getReportProgress, regenerateReportSection } from '../api/report'
-import { reembedGraph } from '../api/graph'
+import { getGraphQuality, reembedGraph } from '../api/graph'
 
 const router = useRouter()
 
@@ -469,6 +474,7 @@ const isComplete = ref(false)
 const reportStatus = ref('pending')
 const reportQuality = ref(null)
 const reportProgress = ref(null)
+const graphQuality = ref(null)
 const reportSimulationId = ref(props.simulationId || null)
 const reportGraphId = ref(null)
 const isRepairing = ref(false)
@@ -1771,6 +1777,20 @@ const statusText = computed(() => {
   return 'Waiting'
 })
 
+const graphQualityStatusClass = computed(() => {
+  if (!graphQuality.value) return 'pending'
+  if (graphQuality.value.status === 'fail') return 'error'
+  if (graphQuality.value.status === 'warn') return 'needs-review'
+  return 'completed'
+})
+
+const graphQualitySummary = computed(() => {
+  const deductions = graphQuality.value?.deductions || []
+  if (deductions.length > 0) return deductions[0].message
+  if (graphQuality.value?.safe_to_report) return 'Graph structure is ready for synthesis'
+  return 'Graph structure is usable, but embeddings may still need repair'
+})
+
 const totalSections = computed(() => {
   return reportOutline.value?.sections?.length || 0
 })
@@ -1900,6 +1920,7 @@ const repairEmbeddings = async () => {
     const res = await reembedGraph(reportGraphId.value, { batch_size: 32 })
     if (res.success) {
       addLog('Embedding repair completed')
+      graphQuality.value = null
       await fetchReportSnapshot()
     }
   } catch (err) {
@@ -2230,6 +2251,16 @@ const fetchReportSnapshot = async () => {
       reportQuality.value = report.quality_score || null
       reportSimulationId.value = report.simulation_id || reportSimulationId.value
       reportGraphId.value = report.graph_id || reportGraphId.value
+      if (reportGraphId.value && graphQuality.value?.graph_id !== reportGraphId.value) {
+        try {
+          const qualityRes = await getGraphQuality(reportGraphId.value)
+          if (qualityRes.success) {
+            graphQuality.value = qualityRes.data
+          }
+        } catch (err) {
+          console.warn('Failed to fetch graph quality:', err)
+        }
+      }
       if (report.outline) {
         reportOutline.value = report.outline
         const savedSections = {}
@@ -2391,6 +2422,7 @@ watch(() => props.reportId, (newId) => {
     reportStatus.value = 'pending'
     reportQuality.value = null
     reportProgress.value = null
+    graphQuality.value = null
     startTime.value = null
     
     startPolling()

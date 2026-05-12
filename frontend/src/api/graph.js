@@ -70,6 +70,18 @@ export function getGraphEmbeddingStatus(graphId) {
 }
 
 /**
+ * Get structural graph quality and synthesis readiness
+ * @param {String} graphId - Graph ID
+ * @returns {Promise}
+ */
+export function getGraphQuality(graphId) {
+  return service({
+    url: `/api/graph/${graphId}/quality`,
+    method: 'get'
+  })
+}
+
+/**
  * Repair/backfill graph embeddings
  * @param {String} graphId - Graph ID
  * @param {Object} data - { batch_size? }

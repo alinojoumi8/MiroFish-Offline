@@ -108,3 +108,57 @@ def test_reembed_graph_uses_document_texts_and_updates_metadata(monkeypatch):
     assert updated["metadata"] is True
     assert result["embedded_nodes"] == 1
     assert result["embedded_relationships"] == 1
+
+
+class FakeQualitySession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def run(self, query, **kwargs):
+        if "MATCH (g:Graph" in query:
+            return FakeResult({
+                "provider": "ollama",
+                "model": "nomic-embed-text",
+                "dimensions": 768,
+                "provider_id": "ollama:nomic-embed-text:768",
+            })
+        if "n.embedding" in query:
+            return FakeResult({"total": 8, "embedded": 8})
+        if "r.fact_embedding" in query:
+            return FakeResult({"total": 4, "embedded": 4})
+        if "empty_summaries" in query:
+            return FakeResult({"total": 8, "empty_summaries": 1})
+        if "isolated" in query:
+            return FakeResult({"isolated": 3})
+        if "relation_type_count" in query:
+            return FakeResult({"total": 4, "relation_type_count": 1, "empty_facts": 0})
+        if "entity_type_count" in query:
+            return FakeResult({"entity_type_count": 1})
+        if "duplicate_name_groups" in query:
+            return FakeResult({"duplicate_name_groups": 1, "duplicate_nodes": 2})
+        if "episode_count" in query:
+            return FakeResult({"episode_count": 3})
+        raise AssertionError(query)
+
+
+class FakeQualityDriver:
+    def session(self):
+        return FakeQualitySession()
+
+
+def test_graph_quality_reports_structural_warnings():
+    storage = Neo4jStorage.__new__(Neo4jStorage)
+    storage._driver = FakeQualityDriver()
+    storage._embedding = FakeEmbedding()
+
+    quality = storage.get_graph_quality("graph-1")
+
+    assert quality["graph_id"] == "graph-1"
+    assert quality["score"] < 75
+    assert quality["status"] == "warn"
+    assert quality["safe_to_report"] is True
+    assert quality["isolated_nodes"] == 3
+    assert any(item["code"] == "high_isolated_nodes" for item in quality["deductions"])
