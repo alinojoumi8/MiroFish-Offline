@@ -12,6 +12,7 @@ from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
+from ..services.embedding_benchmark import DEFAULT_QUERIES, run_embedding_benchmark
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
@@ -599,6 +600,43 @@ def get_graph_quality(graph_id: str):
         return jsonify({
             "success": True,
             "data": storage.get_graph_quality(graph_id)
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@graph_bp.route('/<graph_id>/benchmark-embeddings', methods=['POST'])
+def benchmark_graph_embeddings(graph_id: str):
+    """Benchmark embedding providers against the same query set."""
+    try:
+        data = request.get_json(silent=True) or {}
+        providers = data.get("providers") or ["ollama", "gemini"]
+        providers = [str(provider).strip().lower() for provider in providers if str(provider).strip()]
+        invalid = [provider for provider in providers if provider not in {"ollama", "gemini"}]
+        if invalid:
+            return jsonify({"success": False, "error": f"Unsupported providers: {', '.join(invalid)}"}), 400
+        if not providers:
+            return jsonify({"success": False, "error": "At least one provider is required"}), 400
+
+        queries = data.get("queries") or DEFAULT_QUERIES
+        queries = [str(query).strip() for query in queries if str(query).strip()]
+        if not queries:
+            return jsonify({"success": False, "error": "At least one benchmark query is required"}), 400
+        queries = queries[:25]
+        limit = max(1, min(int(data.get("limit", 10)), 25))
+
+        return jsonify({
+            "success": True,
+            "data": run_embedding_benchmark(
+                graph_id=graph_id,
+                providers=providers,
+                queries=queries,
+                limit=limit,
+            )
         })
     except Exception as e:
         return jsonify({

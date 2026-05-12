@@ -150,6 +150,27 @@
             <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({ strict_antirepetition: true })">
               Strict anti-repeat
             </button>
+            <button class="operator-btn" :disabled="!reportGraphId || isBenchmarking" @click="runEmbeddingBenchmark">
+              {{ isBenchmarking ? 'Benchmarking...' : 'Benchmark embeddings' }}
+            </button>
+          </div>
+
+          <div v-if="benchmarkResult" class="benchmark-panel">
+            <div class="benchmark-header">
+              <span class="benchmark-title">Embedding benchmark</span>
+              <span class="benchmark-meta mono">{{ benchmarkResult.query_count }} queries</span>
+            </div>
+            <div class="benchmark-grid">
+              <div v-for="row in benchmarkRows" :key="row.providerId" class="benchmark-row">
+                <span class="benchmark-provider mono">{{ row.providerId }}</span>
+                <span class="benchmark-metric">Embed p50 {{ row.embeddingP50 }}ms</span>
+                <span class="benchmark-metric">Search p50 {{ row.searchP50 }}ms</span>
+                <span v-if="row.errorCount" class="benchmark-warning">{{ row.errorCount }} errors</span>
+              </div>
+            </div>
+            <div v-if="benchmarkOverlap !== null" class="benchmark-overlap">
+              Top-k overlap {{ Math.round(benchmarkOverlap * 100) }}%
+            </div>
           </div>
 
           <div class="workflow-steps" v-if="workflowSteps.length > 0">
@@ -440,7 +461,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { generateReport, getAgentLog, getConsoleLog, getReport, getReportProgress, regenerateReportSection } from '../api/report'
-import { getGraphQuality, reembedGraph } from '../api/graph'
+import { benchmarkGraphEmbeddings, getGraphQuality, reembedGraph } from '../api/graph'
 
 const router = useRouter()
 
@@ -480,6 +501,8 @@ const reportGraphId = ref(null)
 const isRepairing = ref(false)
 const isRegenerating = ref(false)
 const regeneratingSection = ref(null)
+const isBenchmarking = ref(false)
+const benchmarkResult = ref(null)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -1791,6 +1814,27 @@ const graphQualitySummary = computed(() => {
   return 'Graph structure is usable, but embeddings may still need repair'
 })
 
+const benchmarkRows = computed(() => {
+  return (benchmarkResult.value?.providers || []).map((provider) => {
+    const queryErrors = (provider.queries || []).filter((query) => query.error).length
+    return {
+      providerId: provider.provider?.provider_id || provider.provider?.model || 'unknown',
+      embeddingP50: provider.embedding_latency?.p50_ms ?? 0,
+      searchP50: provider.graph_search_latency?.p50_ms ?? 0,
+      errorCount: queryErrors
+    }
+  })
+})
+
+const benchmarkOverlap = computed(() => {
+  const items = benchmarkResult.value?.overlap?.top_k_overlap_by_query || []
+  const values = items
+    .map((item) => item.overlap)
+    .filter((value) => typeof value === 'number')
+  if (!values.length) return null
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+})
+
 const totalSections = computed(() => {
   return reportOutline.value?.sections?.length || 0
 })
@@ -1981,6 +2025,26 @@ const regenerateSection = async (sectionIndex, options = {}) => {
     addLog(`Section regeneration failed: ${err.message}`)
   } finally {
     regeneratingSection.value = null
+  }
+}
+
+const runEmbeddingBenchmark = async () => {
+  if (!reportGraphId.value || isBenchmarking.value) return
+  isBenchmarking.value = true
+  try {
+    addLog(`Benchmarking embeddings for graph ${reportGraphId.value}`)
+    const res = await benchmarkGraphEmbeddings(reportGraphId.value, {
+      providers: ['ollama', 'gemini'],
+      limit: 10
+    })
+    if (res.success) {
+      benchmarkResult.value = res.data
+      addLog('Embedding benchmark completed')
+    }
+  } catch (err) {
+    addLog(`Embedding benchmark failed: ${err.message}`)
+  } finally {
+    isBenchmarking.value = false
   }
 }
 
@@ -2423,6 +2487,7 @@ watch(() => props.reportId, (newId) => {
     reportQuality.value = null
     reportProgress.value = null
     graphQuality.value = null
+    benchmarkResult.value = null
     startTime.value = null
     
     startPolling()
@@ -3119,6 +3184,75 @@ watch(() => props.reportId, (newId) => {
 .operator-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.benchmark-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+}
+
+.benchmark-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.benchmark-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: #111827;
+}
+
+.benchmark-meta {
+  font-size: 10px;
+  color: #6B7280;
+}
+
+.benchmark-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.benchmark-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) 1fr 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #374151;
+}
+
+.benchmark-provider {
+  color: #111827;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-metric {
+  white-space: nowrap;
+}
+
+.benchmark-warning {
+  color: #B45309;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.benchmark-overlap {
+  font-size: 11px;
+  color: #4B5563;
+  border-top: 1px solid #F3F4F6;
+  padding-top: 8px;
 }
 
 .workflow-steps {

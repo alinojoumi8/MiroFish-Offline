@@ -82,6 +82,20 @@ export function getGraphQuality(graphId) {
 }
 
 /**
+ * Benchmark embedding providers against this graph
+ * @param {String} graphId - Graph ID
+ * @param {Object} data - { providers?, queries?, limit? }
+ * @returns {Promise}
+ */
+export function benchmarkGraphEmbeddings(graphId, data = {}) {
+  return service({
+    url: `/api/graph/${graphId}/benchmark-embeddings`,
+    method: 'post',
+    data
+  })
+}
+
+/**
  * Repair/backfill graph embeddings
  * @param {String} graphId - Graph ID
  * @param {Object} data - { batch_size? }
