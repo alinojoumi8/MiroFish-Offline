@@ -31,6 +31,7 @@
               <div class="section-header-row" @click="toggleSectionCollapse(idx)" :class="{ 'clickable': isSectionCompleted(idx + 1) }">
                 <span class="section-number">{{ String(idx + 1).padStart(2, '0') }}</span>
                 <h3 class="section-title">{{ section.title }}</h3>
+                <span v-if="section.evidence_cards?.length" class="evidence-count mono">{{ section.evidence_cards.length }} evidence</span>
                 <svg 
                   v-if="isSectionCompleted(idx + 1)" 
                   class="collapse-icon" 
@@ -2538,6 +2539,18 @@ watch(() => props.reportId, (newId) => {
   color: #111827;
   margin: 0;
   transition: color 0.3s ease;
+}
+
+.evidence-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: #4B5563;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  border-radius: 999px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  align-self: center;
 }
 
 /* States */

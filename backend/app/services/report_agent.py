@@ -403,12 +403,14 @@ class ReportSection:
     title: str
     content: str = ""
     description: str = ""
+    evidence_cards: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "title": self.title,
             "content": self.content,
             "description": self.description,
+            "evidence_cards": self.evidence_cards,
         }
 
     def to_markdown(self, level: int = 2) -> str:
@@ -1399,6 +1401,8 @@ class ReportAgent:
 
         # Report context for InsightForge sub-question generation
         report_context = f"Section Title: {section.title}\nSimulation Requirement: {self.simulation_requirement}"
+        evidence_cards: List[Dict[str, Any]] = []
+        evidence_seen = set()
         
         for iteration in range(max_iterations):
             if progress_callback:
@@ -1544,6 +1548,17 @@ class ReportAgent:
                     call.get("parameters", {}),
                     report_context=report_context
                 )
+                for card in ReportManager.extract_evidence_cards(
+                    text=result,
+                    tool_name=call["name"],
+                    query=str(call.get("parameters", {}).get("query") or call.get("parameters", {}).get("interview_topic") or ""),
+                    section_title=section.title,
+                ):
+                    normalized = card.get("normalized_fact")
+                    if normalized and normalized not in evidence_seen:
+                        evidence_cards.append(card)
+                        evidence_seen.add(normalized)
+                section.evidence_cards = evidence_cards
 
                 if self.report_logger:
                     self.report_logger.log_tool_result(
@@ -2716,6 +2731,54 @@ class ReportManager:
         else:
             report.status = ReportStatus.COMPLETED
 
+    @classmethod
+    def extract_evidence_cards(
+        cls,
+        text: str,
+        tool_name: str,
+        query: str,
+        section_title: str,
+        max_cards: int = 12,
+    ) -> List[Dict[str, Any]]:
+        """Extract auditable evidence cards from a tool result."""
+        if not text:
+            return []
+
+        candidates: List[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            numbered = re.match(r"^\d+\.\s*\"?(.+?)\"?\s*$", stripped)
+            bullet = re.match(r"^[-*]\s+\"?(.+?)\"?\s*$", stripped)
+            if numbered:
+                candidates.append(numbered.group(1).strip())
+            elif bullet:
+                candidates.append(bullet.group(1).strip())
+
+        if not candidates:
+            candidates = cls._extract_report_sentences(text)
+
+        cards = []
+        seen = set()
+        for candidate in candidates:
+            fact = candidate.strip().strip('"')
+            normalized = cls._normalize_fact(fact)
+            if not normalized or normalized in seen:
+                continue
+            if not cls._looks_like_specific_evidence(fact):
+                continue
+            seen.add(normalized)
+            cards.append({
+                "fact": fact,
+                "normalized_fact": normalized,
+                "tool_name": tool_name,
+                "query": query,
+                "section_title": section_title,
+                "usage": "retrieved",
+            })
+            if len(cards) >= max_cards:
+                break
+        return cards
+
     @staticmethod
     def _extract_report_sections(content: str) -> List[str]:
         parts = re.split(r"(?m)^##\s+.+$", content or "")
@@ -2792,6 +2855,7 @@ class ReportManager:
                     title=s['title'],
                     content=s.get('content', ''),
                     description=s.get('description', ''),
+                    evidence_cards=s.get('evidence_cards', []),
                 ))
             outline = ReportOutline(
                 title=outline_data['title'],

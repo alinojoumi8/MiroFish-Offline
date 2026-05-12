@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from app.services.report_agent import Report, ReportManager, ReportStatus
+from app.services.report_agent import Report, ReportManager, ReportSection, ReportStatus
 
 
 def test_validate_report_output_blocks_raw_tool_call():
@@ -107,3 +107,34 @@ def test_enrich_progress_marks_old_generating_report_stale():
 
     assert enriched["is_stale"] is True
     assert enriched["effective_status"] == "stale"
+
+
+def test_extract_evidence_cards_dedupes_numbered_facts():
+    tool_result = """
+### Key Facts
+1. "TechCrunch published an internal memo showing Duolingo expected 88% of users to defect."
+2. "TechCrunch published an internal memo showing Duolingo expected 88% of users to defect."
+3. Lingua set its replacement plan at $14.99 per month after the shutdown.
+"""
+
+    cards = ReportManager.extract_evidence_cards(
+        text=tool_result,
+        tool_name="insight_forge",
+        query="Duolingo migration risk",
+        section_title="Competitive Response",
+    )
+
+    assert len(cards) == 2
+    assert cards[0]["tool_name"] == "insight_forge"
+    assert cards[0]["query"] == "Duolingo migration risk"
+    assert cards[0]["section_title"] == "Competitive Response"
+    assert cards[0]["usage"] == "retrieved"
+
+
+def test_report_section_serializes_evidence_cards():
+    section = ReportSection(
+        title="Competitive Response",
+        evidence_cards=[{"fact": "Duolingo expected 88% migration.", "tool_name": "quick_search"}],
+    )
+
+    assert section.to_dict()["evidence_cards"][0]["fact"] == "Duolingo expected 88% migration."
