@@ -920,7 +920,9 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        graph_tools: Optional[GraphToolsService] = None
+        graph_tools: Optional[GraphToolsService] = None,
+        disable_interviews: bool = False,
+        strict_antirepetition: bool = False,
     ):
         """
         Initialize Report Agent
@@ -935,6 +937,8 @@ class ReportAgent:
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
+        self.disable_interviews = disable_interviews
+        self.strict_antirepetition = strict_antirepetition
 
         self.llm = llm_client or LLMClient()
         if graph_tools is None:
@@ -956,7 +960,7 @@ class ReportAgent:
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """Define available tools"""
-        return {
+        tools = {
             "insight_forge": {
                 "name": "insight_forge",
                 "description": TOOL_DESC_INSIGHT_FORGE,
@@ -990,6 +994,9 @@ class ReportAgent:
                 }
             }
         }
+        if self.disable_interviews:
+            tools.pop("interview_agents", None)
+        return tools
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
         """
@@ -1044,6 +1051,8 @@ class ReportAgent:
                 return result.to_text()
             
             elif tool_name == "interview_agents":
+                if self.disable_interviews:
+                    return "Interview tool disabled for this report run. Use graph evidence and retrieved simulation facts only."
                 # Deep interview - call real OASIS interview API to get simulated agent responses (dual platform)
                 interview_topic = parameters.get("interview_topic", parameters.get("query", ""))
                 max_agents = parameters.get("max_agents", 5)
@@ -1269,6 +1278,10 @@ class ReportAgent:
         role_parts = []
         if description:
             role_parts.append(f"Planned focus: {description}")
+        if self.strict_antirepetition:
+            role_parts.append(
+                "Strict anti-repetition is enabled: prioritize unused evidence, avoid repeating prior numbers/named facts, and add new implications when a fact must be referenced."
+            )
 
         if section_index <= 1:
             role_parts.append(
@@ -1304,6 +1317,8 @@ class ReportAgent:
         """Extract reused-risk facts from completed sections for prompt-level de-duplication."""
         if not previous_sections:
             return "(No prior evidence used yet.)"
+        if self.strict_antirepetition:
+            max_items = max(max_items, 24)
 
         evidence: List[str] = []
         seen = set()
@@ -1397,7 +1412,7 @@ class ReportAgent:
         min_tool_calls = 3  # Minimum tool calls
         conflict_retries = 0  # Consecutive conflicts where tool calls and Final Answer appear simultaneously
         used_tools = set()  # Record tool names already called
-        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = set(self.tools.keys())
 
         # Report context for InsightForge sub-question generation
         report_context = f"Section Title: {section.title}\nSimulation Requirement: {self.simulation_requirement}"

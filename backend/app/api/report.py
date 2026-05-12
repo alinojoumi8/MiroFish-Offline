@@ -104,7 +104,9 @@ def generate_report():
                     graph_id=graph_id,
                     simulation_id=simulation_id,
                     simulation_requirement=simulation_requirement,
-                    graph_tools=graph_tools
+                    graph_tools=graph_tools,
+                    disable_interviews=bool(data.get("disable_interviews", False)),
+                    strict_antirepetition=bool(data.get("strict_antirepetition", False)),
                 )
                 def progress_callback(stage, progress, message):
                     task_manager.update_task(task_id, progress=progress, message=f"[{stage}] {message}")

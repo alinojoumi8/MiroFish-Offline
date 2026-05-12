@@ -116,6 +116,21 @@
             <span v-if="reportProgress?.is_stale" class="quality-note">No heartbeat for {{ reportProgress.seconds_since_update }}s</span>
           </div>
 
+          <div class="operator-actions">
+            <button class="operator-btn" :disabled="!reportGraphId || isRepairing" @click="repairEmbeddings">
+              {{ isRepairing ? 'Repairing...' : 'Repair embeddings' }}
+            </button>
+            <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({})">
+              Regenerate
+            </button>
+            <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({ disable_interviews: true })">
+              No interviews
+            </button>
+            <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({ strict_antirepetition: true })">
+              Strict anti-repeat
+            </button>
+          </div>
+
           <div class="workflow-steps" v-if="workflowSteps.length > 0">
             <div
               v-for="(step, sidx) in workflowSteps"
@@ -403,7 +418,8 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { getAgentLog, getConsoleLog, getReport, getReportProgress } from '../api/report'
+import { generateReport, getAgentLog, getConsoleLog, getReport, getReportProgress } from '../api/report'
+import { reembedGraph } from '../api/graph'
 
 const router = useRouter()
 
@@ -437,6 +453,10 @@ const isComplete = ref(false)
 const reportStatus = ref('pending')
 const reportQuality = ref(null)
 const reportProgress = ref(null)
+const reportSimulationId = ref(props.simulationId || null)
+const reportGraphId = ref(null)
+const isRepairing = ref(false)
+const isRegenerating = ref(false)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -1750,6 +1770,10 @@ const progressPercent = computed(() => {
   return Math.round((completedSections.value / totalSections.value) * 100)
 })
 
+const activeSimulationId = computed(() => {
+  return props.simulationId || reportSimulationId.value
+})
+
 const totalToolCalls = computed(() => {
   return agentLogs.value.filter(l => l.action === 'tool_call').length
 })
@@ -1849,6 +1873,44 @@ const workflowSteps = computed(() => {
 // Methods
 const addLog = (msg) => {
   emit('add-log', msg)
+}
+
+const repairEmbeddings = async () => {
+  if (!reportGraphId.value || isRepairing.value) return
+  isRepairing.value = true
+  try {
+    addLog(`Repairing embeddings for graph ${reportGraphId.value}`)
+    const res = await reembedGraph(reportGraphId.value, { batch_size: 32 })
+    if (res.success) {
+      addLog('Embedding repair completed')
+      await fetchReportSnapshot()
+    }
+  } catch (err) {
+    addLog(`Embedding repair failed: ${err.message}`)
+  } finally {
+    isRepairing.value = false
+  }
+}
+
+const regenerateReport = async (options = {}) => {
+  if (!activeSimulationId.value || isRegenerating.value) return
+  isRegenerating.value = true
+  try {
+    const payload = {
+      simulation_id: activeSimulationId.value,
+      force_regenerate: true,
+      ...options
+    }
+    addLog(`Starting report regeneration: ${JSON.stringify(options)}`)
+    const res = await generateReport(payload)
+    if (res.success && res.data?.report_id) {
+      router.push({ name: 'Report', params: { reportId: res.data.report_id } })
+    }
+  } catch (err) {
+    addLog(`Regeneration failed: ${err.message}`)
+  } finally {
+    isRegenerating.value = false
+  }
 }
 
 const isSectionCompleted = (sectionIndex) => {
@@ -2116,6 +2178,8 @@ const fetchReportSnapshot = async () => {
       const report = reportRes.value.data
       reportStatus.value = report.status || reportStatus.value
       reportQuality.value = report.quality_score || null
+      reportSimulationId.value = report.simulation_id || reportSimulationId.value
+      reportGraphId.value = report.graph_id || reportGraphId.value
       if (report.outline && !reportOutline.value) {
         reportOutline.value = report.outline
       }
@@ -2903,6 +2967,37 @@ watch(() => props.reportId, (newId) => {
 .quality-strip--stale,
 .quality-strip--error {
   color: #991B1B;
+}
+
+.operator-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid #E5E7EB;
+  margin-bottom: 12px;
+}
+
+.operator-btn {
+  border: 1px solid #D1D5DB;
+  background: #FFFFFF;
+  color: #374151;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.operator-btn:hover:not(:disabled) {
+  background: #F9FAFB;
+  border-color: #9CA3AF;
+}
+
+.operator-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .workflow-steps {

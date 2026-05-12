@@ -58,6 +58,32 @@ export function getGraphData(graphId) {
 }
 
 /**
+ * Get graph embedding readiness and coverage
+ * @param {String} graphId - Graph ID
+ * @returns {Promise}
+ */
+export function getGraphEmbeddingStatus(graphId) {
+  return service({
+    url: `/api/graph/${graphId}/embedding-status`,
+    method: 'get'
+  })
+}
+
+/**
+ * Repair/backfill graph embeddings
+ * @param {String} graphId - Graph ID
+ * @param {Object} data - { batch_size? }
+ * @returns {Promise}
+ */
+export function reembedGraph(graphId, data = {}) {
+  return service({
+    url: `/api/graph/${graphId}/reembed`,
+    method: 'post',
+    data
+  })
+}
+
+/**
  * Get project information
  * @param {String} projectId - Project ID
  * @returns {Promise}
