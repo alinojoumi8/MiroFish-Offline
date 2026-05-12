@@ -10,10 +10,18 @@ export const generateReport = (data) => {
 
 /**
  * Get report generation status
+ * @param {Object} data - { task_id?, simulation_id? }
+ */
+export const getReportStatus = (data) => {
+  return service.post('/api/report/generate/status', data)
+}
+
+/**
+ * Get persisted report progress by report id
  * @param {string} reportId
  */
-export const getReportStatus = (reportId) => {
-  return service.get(`/api/report/generate/status`, { params: { report_id: reportId } })
+export const getReportProgress = (reportId) => {
+  return service.get(`/api/report/${reportId}/progress`)
 }
 
 /**
