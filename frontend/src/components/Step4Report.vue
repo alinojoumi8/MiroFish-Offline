@@ -138,6 +138,7 @@
           </div>
 
           <div class="operator-actions">
+            <span class="operator-mode mono">Mode {{ reportModeLabel }}</span>
             <button class="operator-btn" :disabled="!reportGraphId || isRepairing" @click="repairEmbeddings">
               {{ isRepairing ? 'Repairing...' : 'Repair embeddings' }}
             </button>
@@ -149,6 +150,9 @@
             </button>
             <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({ strict_antirepetition: true })">
               Strict anti-repeat
+            </button>
+            <button class="operator-btn" :disabled="!activeSimulationId || isRegenerating" @click="regenerateReport({ report_mode: 'legal_case', strict_antirepetition: true })">
+              Legal mode
             </button>
             <button class="operator-btn" :disabled="!reportGraphId || isBenchmarking" @click="runEmbeddingBenchmark">
               {{ isBenchmarking ? 'Benchmarking...' : 'Benchmark embeddings' }}
@@ -498,6 +502,7 @@ const reportProgress = ref(null)
 const graphQuality = ref(null)
 const reportSimulationId = ref(props.simulationId || null)
 const reportGraphId = ref(null)
+const reportMode = ref('prediction')
 const isRepairing = ref(false)
 const isRegenerating = ref(false)
 const regeneratingSection = ref(null)
@@ -1814,6 +1819,16 @@ const graphQualitySummary = computed(() => {
   return 'Graph structure is usable, but embeddings may still need repair'
 })
 
+const reportModeLabel = computed(() => {
+  const labels = {
+    prediction: 'Prediction',
+    legal_case: 'Legal',
+    market_prediction: 'Market',
+    product_risk: 'Product'
+  }
+  return labels[reportMode.value] || reportMode.value
+})
+
 const benchmarkRows = computed(() => {
   return (benchmarkResult.value?.providers || []).map((provider) => {
     const queryErrors = (provider.queries || []).filter((query) => query.error).length
@@ -1981,6 +1996,7 @@ const regenerateReport = async (options = {}) => {
     const payload = {
       simulation_id: activeSimulationId.value,
       force_regenerate: true,
+      report_mode: reportMode.value,
       ...options
     }
     addLog(`Starting report regeneration: ${JSON.stringify(options)}`)
@@ -2315,6 +2331,7 @@ const fetchReportSnapshot = async () => {
       reportQuality.value = report.quality_score || null
       reportSimulationId.value = report.simulation_id || reportSimulationId.value
       reportGraphId.value = report.graph_id || reportGraphId.value
+      reportMode.value = report.report_mode || reportMode.value
       if (reportGraphId.value && graphQuality.value?.graph_id !== reportGraphId.value) {
         try {
           const qualityRes = await getGraphQuality(reportGraphId.value)
@@ -2487,6 +2504,7 @@ watch(() => props.reportId, (newId) => {
     reportQuality.value = null
     reportProgress.value = null
     graphQuality.value = null
+    reportMode.value = 'prediction'
     benchmarkResult.value = null
     startTime.value = null
     
@@ -3158,10 +3176,21 @@ watch(() => props.reportId, (newId) => {
 .operator-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   padding: 0 0 12px;
   border-bottom: 1px solid #E5E7EB;
   margin-bottom: 12px;
+}
+
+.operator-mode {
+  font-size: 10px;
+  font-weight: 800;
+  color: #6B7280;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  border-radius: 999px;
+  padding: 6px 9px;
 }
 
 .operator-btn {

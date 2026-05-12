@@ -10,7 +10,7 @@ from flask import request, jsonify, send_file, current_app
 
 from . import report_bp
 from ..config import Config
-from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
+from ..services.report_agent import ReportAgent, ReportManager, ReportStatus, normalize_report_mode
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
 from ..models.task import TaskManager, TaskStatus
@@ -41,6 +41,7 @@ def generate_report():
             return jsonify({"success": False, "error": "Please provide simulation_id"}), 400
 
         force_regenerate = data.get('force_regenerate', False)
+        report_mode = normalize_report_mode(data.get('report_mode'))
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         if not state:
@@ -48,7 +49,11 @@ def generate_report():
 
         if not force_regenerate:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
-            if existing_report and existing_report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]:
+            if (
+                existing_report
+                and existing_report.report_mode == report_mode
+                and existing_report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]
+            ):
                 existing_issues = ReportManager.validate_report_output(existing_report)
                 blocking_issues = [issue for issue in existing_issues if issue.get("blocking")]
                 if blocking_issues:
@@ -117,6 +122,7 @@ def generate_report():
                     graph_tools=graph_tools,
                     disable_interviews=_json_bool(data.get("disable_interviews"), False),
                     strict_antirepetition=_json_bool(data.get("strict_antirepetition"), False),
+                    report_mode=report_mode,
                 )
                 def progress_callback(stage, progress, message):
                     task_manager.update_task(task_id, progress=progress, message=f"[{stage}] {message}")
@@ -285,14 +291,16 @@ def chat_with_report_agent():
 
         storage = current_app.extensions.get('neo4j_storage')
         if not storage:
-            raise ValueError("GraphStorage not initialized — check Neo4j connection")
+            raise ValueError("GraphStorage not initialized - check Neo4j connection")
         graph_tools = GraphToolsService(storage=storage)
+        existing_report = ReportManager.get_report_by_simulation(simulation_id)
 
         agent = ReportAgent(
             graph_id=graph_id,
             simulation_id=simulation_id,
             simulation_requirement=simulation_requirement,
-            graph_tools=graph_tools
+            graph_tools=graph_tools,
+            report_mode=existing_report.report_mode if existing_report else "prediction",
         )
 
         result = agent.chat(message=message, chat_history=chat_history)
@@ -370,6 +378,7 @@ def regenerate_report_section(report_id: str, section_index: int):
             graph_tools=GraphToolsService(storage=storage),
             disable_interviews=disable_interviews,
             strict_antirepetition=strict_antirepetition,
+            report_mode=report.report_mode,
         )
         updated_report = agent.regenerate_section(
             report=report,

@@ -452,6 +452,7 @@ class Report:
     graph_id: str
     simulation_requirement: str
     status: ReportStatus
+    report_mode: str = "prediction"
     outline: Optional[ReportOutline] = None
     markdown_content: str = ""
     created_at: str = ""
@@ -466,6 +467,7 @@ class Report:
             "simulation_id": self.simulation_id,
             "graph_id": self.graph_id,
             "simulation_requirement": self.simulation_requirement,
+            "report_mode": self.report_mode,
             "status": self.status.value,
             "outline": self.outline.to_dict() if self.outline else None,
             "markdown_content": self.markdown_content,
@@ -480,6 +482,45 @@ class Report:
 # ═══════════════════════════════════════════════════════════════
 # Prompt Template Constants
 # ═══════════════════════════════════════════════════════════════
+
+REPORT_MODE_GUIDANCE = {
+    "prediction": """\
+[Domain Mode: General Prediction]
+- Write a future prediction report from the simulated world.
+- Prioritize projected actors, behavior, causal signals, risks, and decision points.
+- Use probabilistic language where evidence is uncertain.""",
+    "legal_case": """\
+[Domain Mode: Legal Case Outcome Analysis]
+- This is not legal advice and must not claim a court outcome is certain.
+- Frame conclusions as probabilistic case analysis: likely paths, confidence ranges, and key assumptions.
+- Separate factual record, legal issues/elements, evidence strengths, evidence weaknesses, procedural risks, and settlement/trial posture.
+- Identify missing evidence that would materially change the assessment.
+- Do not invent statutes, case law, deadlines, or legal standards unless retrieved from the graph.
+- Avoid inflammatory advocacy. Use counsel-facing, evidence-grounded language.""",
+    "market_prediction": """\
+[Domain Mode: Market Prediction]
+- Emphasize demand signals, pricing, adoption, competitive response, revenue exposure, and timing.
+- Separate base case, upside case, downside case, and key leading indicators.
+- Keep public benchmark claims out unless retrieved from the graph.""",
+    "product_risk": """\
+[Domain Mode: Product Risk]
+- Emphasize user behavior, adoption friction, operational risks, trust/safety issues, and mitigation options.
+- Separate product risks from go-to-market risks and technical execution risks.
+- Identify the fastest experiments that would validate or falsify the forecast.""",
+}
+
+REPORT_MODE_LABELS = {
+    "prediction": "General Prediction",
+    "legal_case": "Legal Case Outcome Analysis",
+    "market_prediction": "Market Prediction",
+    "product_risk": "Product Risk",
+}
+
+
+def normalize_report_mode(mode: Optional[str]) -> str:
+    normalized = (mode or "prediction").strip().lower().replace("-", "_")
+    return normalized if normalized in REPORT_MODE_GUIDANCE else "prediction"
+
 
 # ── Tool Descriptions ──
 
@@ -634,6 +675,8 @@ Current Section to Write: {section_title}
 
 Current Section Assignment:
 {section_role}
+
+{domain_guidance}
 
 ═══════════════════════════════════════════════════════════════
 [Core Concept]
@@ -923,6 +966,7 @@ class ReportAgent:
         graph_tools: Optional[GraphToolsService] = None,
         disable_interviews: bool = False,
         strict_antirepetition: bool = False,
+        report_mode: str = "prediction",
     ):
         """
         Initialize Report Agent
@@ -939,6 +983,7 @@ class ReportAgent:
         self.simulation_requirement = simulation_requirement
         self.disable_interviews = disable_interviews
         self.strict_antirepetition = strict_antirepetition
+        self.report_mode = normalize_report_mode(report_mode)
 
         self.llm = llm_client or LLMClient()
         if graph_tools is None:
@@ -957,6 +1002,9 @@ class ReportAgent:
         self.console_logger: Optional[ReportConsoleLogger] = None
 
         logger.info(f"ReportAgent initialization complete: graph_id={graph_id}, simulation_id={simulation_id}")
+
+    def _report_mode_guidance(self) -> str:
+        return REPORT_MODE_GUIDANCE[self.report_mode]
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """Define available tools"""
@@ -1210,7 +1258,7 @@ class ReportAgent:
         if progress_callback:
             progress_callback("planning", 30, "Generating report outline...")
         
-        system_prompt = PLAN_SYSTEM_PROMPT
+        system_prompt = PLAN_SYSTEM_PROMPT + "\n\n" + self._report_mode_guidance()
         user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(
             simulation_requirement=self.simulation_requirement,
             total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
@@ -1256,15 +1304,28 @@ class ReportAgent:
         except Exception as e:
             logger.error(f"Outline planning failed: {str(e)}")
             # Return default outline (3 sections as fallback)
+            return self._default_outline()
+
+    def _default_outline(self) -> ReportOutline:
+        if self.report_mode == "legal_case":
             return ReportOutline(
-                title="Future Prediction Report",
-                summary="Future trends and risk analysis based on simulation predictions",
+                title="Legal Case Outcome Analysis",
+                summary="Probabilistic case posture based on simulated evidence and agent behavior.",
                 sections=[
-                    ReportSection(title="Prediction Scenario and Core Findings"),
-                    ReportSection(title="Crowd Behavior Prediction Analysis"),
-                    ReportSection(title="Trend Outlook and Risk Warning")
-                ]
+                    ReportSection(title="Core Case Posture and Outcome Range"),
+                    ReportSection(title="Evidence Strengths and Weaknesses"),
+                    ReportSection(title="Procedural Risks and Missing Proof"),
+                ],
             )
+        return ReportOutline(
+            title="Future Prediction Report",
+            summary="Future trends and risk analysis based on simulation predictions",
+            sections=[
+                ReportSection(title="Prediction Scenario and Core Findings"),
+                ReportSection(title="Crowd Behavior Prediction Analysis"),
+                ReportSection(title="Trend Outlook and Risk Warning"),
+            ],
+        )
 
     def _build_section_role(
         self,
@@ -1286,6 +1347,18 @@ class ReportAgent:
         if section_index <= 1:
             role_parts.append(
                 "Job: establish the core outcome and only the minimum facts needed to frame the report."
+            )
+        elif self.report_mode == "legal_case" and any(word in title for word in ["evidence", "proof", "credibility", "witness"]):
+            role_parts.append(
+                "Job: separate evidentiary strengths from weaknesses, credibility concerns, and missing proof."
+            )
+        elif self.report_mode == "legal_case" and any(word in title for word in ["procedure", "procedural", "settlement", "trial", "risk"]):
+            role_parts.append(
+                "Job: analyze procedural posture, litigation risk, settlement leverage, and what would change the outcome range."
+            )
+        elif self.report_mode == "legal_case" and any(word in title for word in ["case", "outcome", "liability", "defense", "defence"]):
+            role_parts.append(
+                "Job: state the likely case paths and outcome range without claiming legal certainty."
             )
         elif any(word in title for word in ["competitor", "competitive", "duolingo", "babbel", "market"]):
             role_parts.append(
@@ -1381,6 +1454,7 @@ class ReportAgent:
             simulation_requirement=self.simulation_requirement,
             section_title=section.title,
             section_role=self._build_section_role(section, outline, section_index),
+            domain_guidance=self._report_mode_guidance(),
             tools_description=self._get_tools_description(),
         )
 
@@ -1710,6 +1784,7 @@ class ReportAgent:
             graph_id=self.graph_id,
             simulation_requirement=self.simulation_requirement,
             status=ReportStatus.PENDING,
+            report_mode=self.report_mode,
             created_at=datetime.now().isoformat()
         )
         
@@ -2994,6 +3069,7 @@ class ReportManager:
             graph_id=data['graph_id'],
             simulation_requirement=data['simulation_requirement'],
             status=ReportStatus(data['status']),
+            report_mode=normalize_report_mode(data.get('report_mode')),
             outline=outline,
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),

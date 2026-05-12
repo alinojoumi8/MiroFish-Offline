@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from app.services.report_agent import Report, ReportManager, ReportSection, ReportStatus
+from app.services.report_agent import Report, ReportManager, ReportSection, ReportStatus, normalize_report_mode
 
 
 def test_validate_report_output_blocks_raw_tool_call():
@@ -16,6 +16,21 @@ def test_validate_report_output_blocks_raw_tool_call():
     issues = ReportManager.validate_report_output(report)
 
     assert any(issue["code"] == "raw_tool_call" and issue["blocking"] for issue in issues)
+
+
+def test_report_mode_is_serialized_and_normalized():
+    report = Report(
+        report_id="report_1",
+        simulation_id="sim_1",
+        graph_id="graph_1",
+        simulation_requirement="test",
+        status=ReportStatus.COMPLETED,
+        report_mode="legal_case",
+    )
+
+    assert report.to_dict()["report_mode"] == "legal_case"
+    assert normalize_report_mode("legal-case") == "legal_case"
+    assert normalize_report_mode("unsupported") == "prediction"
 
 
 def test_validate_report_output_warns_about_failed_interviews():
