@@ -38,7 +38,7 @@ def generate_report():
 
         if not force_regenerate:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
-            if existing_report and existing_report.status == ReportStatus.COMPLETED:
+            if existing_report and existing_report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]:
                 existing_issues = ReportManager.validate_report_output(existing_report)
                 blocking_issues = [issue for issue in existing_issues if issue.get("blocking")]
                 if blocking_issues:
@@ -50,7 +50,7 @@ def generate_report():
                 return jsonify({"success": True, "data": {
                     "simulation_id": simulation_id,
                     "report_id": existing_report.report_id,
-                    "status": "completed",
+                    "status": existing_report.status.value,
                     "message": "Report already exists",
                     "already_generated": True
                 }})
@@ -110,8 +110,8 @@ def generate_report():
                     task_manager.update_task(task_id, progress=progress, message=f"[{stage}] {message}")
                 report = agent.generate_report(progress_callback=progress_callback, report_id=report_id)
                 ReportManager.save_report(report)
-                if report.status == ReportStatus.COMPLETED:
-                    task_manager.complete_task(task_id, result={"report_id": report.report_id, "simulation_id": simulation_id, "status": "completed"})
+                if report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]:
+                    task_manager.complete_task(task_id, result={"report_id": report.report_id, "simulation_id": simulation_id, "status": report.status.value})
                 else:
                     task_manager.fail_task(task_id, report.error or "Report generation failed")
             except Exception as e:
@@ -144,11 +144,11 @@ def get_generate_status():
 
         if simulation_id:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
-            if existing_report and existing_report.status == ReportStatus.COMPLETED:
+            if existing_report and existing_report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]:
                 return jsonify({"success": True, "data": {
                     "simulation_id": simulation_id,
                     "report_id": existing_report.report_id,
-                    "status": "completed",
+                    "status": existing_report.status.value,
                     "progress": 100,
                     "message": "Report generated",
                     "already_completed": True
@@ -310,7 +310,7 @@ def get_report_sections(report_id: str):
     try:
         sections = ReportManager.get_generated_sections(report_id)
         report = ReportManager.get_report(report_id)
-        is_complete = report is not None and report.status == ReportStatus.COMPLETED
+        is_complete = report is not None and report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]
         return jsonify({"success": True, "data": {
             "report_id": report_id,
             "sections": sections,
@@ -345,7 +345,7 @@ def check_report_status(simulation_id: str):
         has_report = report is not None
         report_status = report.status.value if report and hasattr(report.status, 'value') else (report.status if report else None)
         report_id = report.report_id if report else None
-        interview_unlocked = has_report and report.status == ReportStatus.COMPLETED
+        interview_unlocked = has_report and report.status in [ReportStatus.COMPLETED, ReportStatus.NEEDS_REVIEW]
         return jsonify({"success": True, "data": {
             "simulation_id": simulation_id,
             "has_report": has_report,

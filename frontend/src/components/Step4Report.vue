@@ -93,6 +93,10 @@
               <span class="metric-value mono">{{ completedSections }}/{{ totalSections }}</span>
             </div>
             <div class="metric">
+              <span class="metric-label">Progress</span>
+              <span class="metric-value mono">{{ progressPercent }}%</span>
+            </div>
+            <div class="metric">
               <span class="metric-label">Elapsed</span>
               <span class="metric-value mono">{{ formatElapsedTime }}</span>
             </div>
@@ -103,6 +107,12 @@
             <div class="metric metric-right">
               <span class="metric-pill" :class="`pill--${statusClass}`">{{ statusText }}</span>
             </div>
+          </div>
+
+          <div v-if="reportQuality || reportProgress?.is_stale" class="quality-strip" :class="`quality-strip--${statusClass}`">
+            <span v-if="reportQuality" class="quality-score mono">Quality {{ reportQuality.score }}/100</span>
+            <span v-if="reportQuality?.deductions?.length" class="quality-note">{{ reportQuality.deductions[0].message }}</span>
+            <span v-if="reportProgress?.is_stale" class="quality-note">No heartbeat for {{ reportProgress.seconds_since_update }}s</span>
           </div>
 
           <div class="workflow-steps" v-if="workflowSteps.length > 0">
@@ -392,7 +402,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, getReport, getReportProgress } from '../api/report'
 
 const router = useRouter()
 
@@ -423,6 +433,9 @@ const expandedContent = ref(new Set())
 const expandedLogs = ref(new Set())
 const collapsedSections = ref(new Set())
 const isComplete = ref(false)
+const reportStatus = ref('pending')
+const reportQuality = ref(null)
+const reportProgress = ref(null)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -1702,12 +1715,19 @@ const QuickSearchDisplay = {
 
 // Computed
 const statusClass = computed(() => {
+  if (reportProgress.value?.is_stale) return 'stale'
+  if (reportStatus.value === 'needs_review') return 'needs-review'
+  if (reportStatus.value === 'failed' || reportStatus.value === 'interrupted') return 'error'
   if (isComplete.value) return 'completed'
   if (agentLogs.value.length > 0) return 'processing'
   return 'pending'
 })
 
 const statusText = computed(() => {
+  if (reportProgress.value?.is_stale) return 'Stale'
+  if (reportStatus.value === 'needs_review') return 'Needs review'
+  if (reportStatus.value === 'failed') return 'Failed'
+  if (reportStatus.value === 'interrupted') return 'Interrupted'
   if (isComplete.value) return 'Completed'
   if (agentLogs.value.length > 0) return 'Generating...'
   return 'Waiting'
@@ -1722,6 +1742,9 @@ const completedSections = computed(() => {
 })
 
 const progressPercent = computed(() => {
+  if (typeof reportProgress.value?.progress === 'number' && reportProgress.value.progress >= 0) {
+    return reportProgress.value.progress
+  }
   if (totalSections.value === 0) return 0
   return Math.round((completedSections.value / totalSections.value) * 100)
 })
@@ -2079,6 +2102,47 @@ const fetchAgentLog = async () => {
   }
 }
 
+const fetchReportSnapshot = async () => {
+  if (!props.reportId) return
+
+  try {
+    const [reportRes, progressRes] = await Promise.allSettled([
+      getReport(props.reportId),
+      getReportProgress(props.reportId)
+    ])
+
+    if (reportRes.status === 'fulfilled' && reportRes.value?.success && reportRes.value.data) {
+      const report = reportRes.value.data
+      reportStatus.value = report.status || reportStatus.value
+      reportQuality.value = report.quality_score || null
+      if (report.outline && !reportOutline.value) {
+        reportOutline.value = report.outline
+      }
+      if (['completed', 'needs_review'].includes(report.status)) {
+        isComplete.value = true
+        currentSectionIndex.value = null
+        emit('update-status', report.status === 'needs_review' ? 'needs-review' : 'completed')
+      } else if (['failed', 'interrupted'].includes(report.status)) {
+        isComplete.value = false
+        currentSectionIndex.value = null
+        emit('update-status', 'error')
+      }
+    }
+
+    if (progressRes.status === 'fulfilled' && progressRes.value?.success && progressRes.value.data) {
+      reportProgress.value = progressRes.value.data
+      if (reportProgress.value.effective_status) {
+        reportStatus.value = reportProgress.value.effective_status
+      }
+      if (reportProgress.value.is_stale) {
+        emit('update-status', 'stale')
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to fetch report snapshot:', err)
+  }
+}
+
 // Extract final answer content - extract section content from LLM response
 const extractFinalContent = (response) => {
   if (!response) return null
@@ -2152,10 +2216,14 @@ const fetchConsoleLog = async () => {
 const startPolling = () => {
   if (agentLogTimer || consoleLogTimer) return
   
+  fetchReportSnapshot()
   fetchAgentLog()
   fetchConsoleLog()
   
-  agentLogTimer = setInterval(fetchAgentLog, 2000)
+  agentLogTimer = setInterval(() => {
+    fetchAgentLog()
+    fetchReportSnapshot()
+  }, 2000)
   consoleLogTimer = setInterval(fetchConsoleLog, 1500)
 }
 
@@ -2195,6 +2263,9 @@ watch(() => props.reportId, (newId) => {
     expandedLogs.value = new Set()
     collapsedSections.value = new Set()
     isComplete.value = false
+    reportStatus.value = 'pending'
+    reportQuality.value = null
+    reportProgress.value = null
     startTime.value = null
     
     startPolling()
@@ -2771,10 +2842,54 @@ watch(() => props.reportId, (newId) => {
   color: #065F46;
 }
 
+.metric-pill.pill--needs-review {
+  background: #FFFBEB;
+  border-color: #FCD34D;
+  color: #92400E;
+}
+
+.metric-pill.pill--stale,
+.metric-pill.pill--error {
+  background: #FEF2F2;
+  border-color: #FECACA;
+  color: #991B1B;
+}
+
 .metric-pill.pill--pending {
   background: transparent;
   border-style: dashed;
   color: #6B7280;
+}
+
+.quality-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 12px;
+  font-size: 12px;
+  color: #6B7280;
+  border-bottom: 1px solid #E5E7EB;
+  margin-bottom: 10px;
+}
+
+.quality-score {
+  font-weight: 700;
+  color: #374151;
+}
+
+.quality-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-strip--needs-review {
+  color: #92400E;
+}
+
+.quality-strip--stale,
+.quality-strip--error {
+  color: #991B1B;
 }
 
 .workflow-steps {

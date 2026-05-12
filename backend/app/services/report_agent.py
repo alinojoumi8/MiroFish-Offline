@@ -391,6 +391,9 @@ class ReportStatus(str, Enum):
     PLANNING = "planning"
     GENERATING = "generating"
     COMPLETED = "completed"
+    NEEDS_REVIEW = "needs_review"
+    INTERRUPTED = "interrupted"
+    STALE = "stale"
     FAILED = "failed"
 
 
@@ -453,6 +456,7 @@ class Report:
     completed_at: str = ""
     error: Optional[str] = None
     validation_issues: List[Dict[str, Any]] = field(default_factory=list)
+    quality_score: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -467,6 +471,7 @@ class Report:
             "completed_at": self.completed_at,
             "error": self.error,
             "validation_issues": self.validation_issues,
+            "quality_score": self.quality_score,
         }
 
 
@@ -1813,13 +1818,14 @@ class ReportAgent:
             # Using ReportManagerassembleComplete report
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
             report.validation_issues = ReportManager.validate_report_output(report)
+            report.quality_score = ReportManager.evaluate_report_quality(report)
             blocking_issues = [issue for issue in report.validation_issues if issue.get("blocking")]
             if blocking_issues:
                 raise ValueError(
                     "Report output validation failed: "
                     + "; ".join(issue["message"] for issue in blocking_issues)
                 )
-            report.status = ReportStatus.COMPLETED
+            ReportManager.apply_quality_status(report)
             report.completed_at = datetime.now().isoformat()
             
             # Calculate total elapsed time
@@ -1835,12 +1841,13 @@ class ReportAgent:
             # savefinalReport
             ReportManager.save_report(report)
             ReportManager.update_progress(
-                report_id, "completed", 100, "reportgeneratecomplete",
+                report_id, report.status.value, 100,
+                "reportgeneratecomplete" if report.status == ReportStatus.COMPLETED else "reportneedsreview",
                 completed_sections=completed_section_titles
             )
             
             if progress_callback:
-                progress_callback("completed", 100, "reportgeneratecomplete")
+                progress_callback(report.status.value, 100, "reportgeneratecomplete")
             
             logger.info(f"reportgeneratecomplete: {report_id}")
             
@@ -2014,6 +2021,8 @@ class ReportManager:
     
     # Reportstorage directory
     REPORTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'reports')
+    QUALITY_REVIEW_THRESHOLD = 80
+    PROGRESS_STALE_AFTER_SECONDS = int(os.environ.get('REPORT_PROGRESS_STALE_AFTER_SECONDS', '300'))
     
     @classmethod
     def _ensure_reports_dir(cls):
@@ -2337,7 +2346,8 @@ class ReportManager:
             "message": message,
             "current_section": current_section,
             "completed_sections": completed_sections or [],
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
+            "heartbeat_at": datetime.now().isoformat(),
         }
         
         with open(cls._get_progress_path(report_id), 'w', encoding='utf-8') as f:
@@ -2352,7 +2362,38 @@ class ReportManager:
             return None
         
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            return cls.enrich_progress(json.load(f))
+
+    @classmethod
+    def enrich_progress(
+        cls,
+        progress: Dict[str, Any],
+        stale_after_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Add heartbeat/staleness metadata to persisted report progress."""
+        if not progress:
+            return progress
+
+        stale_after = stale_after_seconds or cls.PROGRESS_STALE_AFTER_SECONDS
+        enriched = dict(progress)
+        status = enriched.get("status")
+        heartbeat = enriched.get("heartbeat_at") or enriched.get("updated_at")
+        seconds_since_update = None
+        is_stale = False
+
+        if heartbeat:
+            try:
+                heartbeat_dt = datetime.fromisoformat(heartbeat)
+                seconds_since_update = max(0, int((datetime.now() - heartbeat_dt).total_seconds()))
+                is_stale = status in {"pending", "planning", "generating"} and seconds_since_update > stale_after
+            except ValueError:
+                seconds_since_update = None
+
+        enriched["heartbeat_at"] = heartbeat
+        enriched["seconds_since_update"] = seconds_since_update
+        enriched["is_stale"] = is_stale
+        enriched["effective_status"] = "stale" if is_stale else status
+        return enriched
     
     @classmethod
     def get_generated_sections(cls, report_id: str) -> List[Dict[str, Any]]:
@@ -2611,6 +2652,70 @@ class ReportManager:
             })
         return issues
 
+    @classmethod
+    def evaluate_report_quality(cls, report: Report) -> Dict[str, Any]:
+        """Score report quality from validation issues and evidence diversity."""
+        issues = report.validation_issues or cls.validate_report_output(report)
+        score = 100
+        deductions = []
+
+        penalty_by_code = {
+            "raw_tool_call": 100,
+            "failed_interview": 15,
+            "degraded_retrieval": 25,
+            "repeated_fact": 20,
+            "meta_commentary": 10,
+        }
+
+        for issue in issues:
+            code = issue.get("code", "unknown")
+            penalty = penalty_by_code.get(code, 5)
+            score -= penalty
+            deductions.append({
+                "code": code,
+                "penalty": penalty,
+                "message": issue.get("message", ""),
+            })
+
+        sections = cls._extract_report_sections(report.markdown_content or "")
+        evidence_counts = [
+            len({
+                cls._normalize_fact(sentence)
+                for sentence in cls._extract_report_sentences(section)
+                if cls._looks_like_specific_evidence(sentence)
+            })
+            for section in sections
+        ]
+        thin_sections = sum(1 for count in evidence_counts if count < 3)
+        if sections and thin_sections:
+            penalty = min(20, thin_sections * 5)
+            score -= penalty
+            deductions.append({
+                "code": "thin_section_evidence",
+                "penalty": penalty,
+                "message": f"{thin_sections} section(s) use fewer than 3 distinct evidence points.",
+            })
+
+        score = max(0, min(100, score))
+        return {
+            "score": score,
+            "threshold": cls.QUALITY_REVIEW_THRESHOLD,
+            "status": "pass" if score >= cls.QUALITY_REVIEW_THRESHOLD else "needs_review",
+            "deductions": deductions,
+            "section_count": len(sections),
+            "section_evidence_counts": evidence_counts,
+        }
+
+    @classmethod
+    def apply_quality_status(cls, report: Report) -> None:
+        """Set completed vs needs_review based on quality score."""
+        if not report.quality_score:
+            report.quality_score = cls.evaluate_report_quality(report)
+        if report.quality_score.get("score", 0) < cls.QUALITY_REVIEW_THRESHOLD:
+            report.status = ReportStatus.NEEDS_REVIEW
+        else:
+            report.status = ReportStatus.COMPLETED
+
     @staticmethod
     def _extract_report_sections(content: str) -> List[str]:
         parts = re.split(r"(?m)^##\s+.+$", content or "")
@@ -2714,6 +2819,7 @@ class ReportManager:
             completed_at=data.get('completed_at', ''),
             error=data.get('error'),
             validation_issues=data.get('validation_issues', []),
+            quality_score=data.get('quality_score', {}),
         )
     
     @classmethod

@@ -110,6 +110,8 @@ const statusClass = computed(() => {
 
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
+  if (currentStatus.value === 'stale') return 'Stale'
+  if (currentStatus.value === 'needs-review') return 'Needs Review'
   if (currentStatus.value === 'completed') return 'Completed'
   return 'Generating'
 })
@@ -324,6 +326,8 @@ onMounted(() => {
 .status-indicator.processing .dot { background: #FF9800; animation: pulse 1s infinite; }
 .status-indicator.completed .dot { background: #4CAF50; }
 .status-indicator.error .dot { background: #F44336; }
+.status-indicator.stale .dot { background: #DC2626; animation: pulse 1s infinite; }
+.status-indicator.needs-review .dot { background: #F59E0B; }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
 
