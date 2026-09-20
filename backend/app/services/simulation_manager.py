@@ -14,6 +14,14 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.resource_safety import (
+    resolve_resource_path,
+    validate_graph_id,
+    validate_project_id,
+    validate_simulation_id,
+)
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
+from ..utils.atomic_state import atomic_write_json, atomic_write_text, resource_lock
 from .entity_reader import EntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
@@ -73,6 +81,7 @@ class SimulationState:
     
     # Error message
     error: Optional[str] = None
+    error_request_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Complete status dict (internal use)"""
@@ -93,7 +102,8 @@ class SimulationState:
             "reddit_status": self.reddit_status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "error": self.error,
+            "error": OPERATION_FAILURE_MESSAGE if self.status == SimulationStatus.FAILED else self.error,
+            "error_request_id": self.error_request_id,
         }
     
     def to_simple_dict(self) -> Dict[str, Any]:
@@ -107,7 +117,8 @@ class SimulationState:
             "profiles_count": self.profiles_count,
             "entity_types": self.entity_types,
             "config_generated": self.config_generated,
-            "error": self.error,
+            "error": OPERATION_FAILURE_MESSAGE if self.status == SimulationStatus.FAILED else self.error,
+            "error_request_id": self.error_request_id,
         }
 
 
@@ -135,37 +146,39 @@ class SimulationManager:
         # In-memory simulation state cache
         self._simulations: Dict[str, SimulationState] = {}
     
-    def _get_simulation_dir(self, simulation_id: str) -> str:
+    def _get_simulation_dir(self, simulation_id: str, create: bool = False) -> str:
         """Get simulation data directory"""
-        sim_dir = os.path.join(self.SIMULATION_DATA_DIR, simulation_id)
-        os.makedirs(sim_dir, exist_ok=True)
+        sim_dir = resolve_resource_path(
+            self.SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
+        )
+        if create:
+            os.makedirs(sim_dir, exist_ok=True)
         return sim_dir
     
     def _save_simulation_state(self, state: SimulationState):
         """Save simulation state to file"""
-        sim_dir = self._get_simulation_dir(state.simulation_id)
-        state_file = os.path.join(sim_dir, "state.json")
-        
-        state.updated_at = datetime.now().isoformat()
-        
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
-        
-        self._simulations[state.simulation_id] = state
+        sim_dir = self._get_simulation_dir(state.simulation_id, create=True)
+        with resource_lock(
+            f"simulation:{state.simulation_id}",
+            lock_path=os.path.join(sim_dir, '.state.lock'),
+        ):
+            state_file = resolve_resource_path(sim_dir, 'state.json')
+            state.updated_at = datetime.now().isoformat()
+            atomic_write_json(state_file, state.to_dict())
+            self._simulations[state.simulation_id] = state
     
     def _load_simulation_state(self, simulation_id: str) -> Optional[SimulationState]:
         """Load simulation state from file"""
-        if simulation_id in self._simulations:
-            return self._simulations[simulation_id]
-        
         sim_dir = self._get_simulation_dir(simulation_id)
-        state_file = os.path.join(sim_dir, "state.json")
-        
-        if not os.path.exists(state_file):
-            return None
-        
-        with open(state_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        state_file = resolve_resource_path(sim_dir, 'state.json')
+        with resource_lock(
+            f"simulation:{simulation_id}",
+            lock_path=os.path.join(sim_dir, '.state.lock'),
+        ):
+            if not os.path.exists(state_file):
+                return None
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
         
         state = SimulationState(
             simulation_id=simulation_id,
@@ -184,7 +197,12 @@ class SimulationManager:
             reddit_status=data.get("reddit_status", "not_started"),
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),
-            error=data.get("error"),
+            error=(
+                OPERATION_FAILURE_MESSAGE
+                if data.get("status") == SimulationStatus.FAILED.value and data.get("error")
+                else data.get("error")
+            ),
+            error_request_id=data.get("error_request_id"),
         )
         
         self._simulations[simulation_id] = state
@@ -210,6 +228,8 @@ class SimulationManager:
             SimulationState
         """
         import uuid
+        validate_project_id(project_id)
+        validate_graph_id(graph_id)
         simulation_id = f"sim_{uuid.uuid4().hex[:12]}"
         
         state = SimulationState(
@@ -236,6 +256,7 @@ class SimulationManager:
         progress_callback: Optional[callable] = None,
         parallel_profile_count: int = 3,
         storage: 'GraphStorage' = None,
+        failure_request_id: str = None,
     ) -> SimulationState:
         """
         Prepare simulation environment (fully automated)
@@ -332,10 +353,10 @@ class SimulationManager:
             realtime_output_path = None
             realtime_platform = "reddit"
             if state.enable_reddit:
-                realtime_output_path = os.path.join(sim_dir, "reddit_profiles.json")
+                realtime_output_path = resolve_resource_path(sim_dir, 'reddit_profiles.json')
                 realtime_platform = "reddit"
             elif state.enable_twitter:
-                realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
+                realtime_output_path = resolve_resource_path(sim_dir, 'twitter_profiles.csv')
                 realtime_platform = "twitter"
             
             profiles = generator.generate_profiles_from_entities(
@@ -363,7 +384,7 @@ class SimulationManager:
             if state.enable_reddit:
                 generator.save_profiles(
                     profiles=profiles,
-                    file_path=os.path.join(sim_dir, "reddit_profiles.json"),
+                    file_path=resolve_resource_path(sim_dir, 'reddit_profiles.json'),
                     platform="reddit"
                 )
             
@@ -371,7 +392,7 @@ class SimulationManager:
                 # Twitter uses CSV format! This is OASIS requirement
                 generator.save_profiles(
                     profiles=profiles,
-                    file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
+                    file_path=resolve_resource_path(sim_dir, 'twitter_profiles.csv'),
                     platform="twitter"
                 )
             
@@ -422,9 +443,12 @@ class SimulationManager:
                 )
             
             # Save config files
-            config_path = os.path.join(sim_dir, "simulation_config.json")
-            with open(config_path, 'w', encoding='utf-8') as f:
-                f.write(sim_params.to_json())
+            config_path = resolve_resource_path(sim_dir, 'simulation_config.json')
+            with resource_lock(
+                f"simulation:{simulation_id}",
+                lock_path=os.path.join(sim_dir, '.state.lock'),
+            ):
+                atomic_write_text(config_path, sim_params.to_json())
             
             state.config_generated = True
             state.config_reasoning = sim_params.generation_reasoning
@@ -450,11 +474,17 @@ class SimulationManager:
             return state
             
         except Exception as e:
-            logger.error(f"Simulation preparation failed: {simulation_id}, error={str(e)}")
+            logger.error(
+                "Simulation preparation failed: %s request_id=%s error=%s",
+                simulation_id,
+                failure_request_id,
+                str(e),
+            )
             import traceback
             logger.error(traceback.format_exc())
             state.status = SimulationStatus.FAILED
-            state.error = str(e)
+            state.error = OPERATION_FAILURE_MESSAGE
+            state.error_request_id = failure_request_id
             self._save_simulation_state(state)
             raise
     
@@ -469,7 +499,10 @@ class SimulationManager:
         if os.path.exists(self.SIMULATION_DATA_DIR):
             for sim_id in os.listdir(self.SIMULATION_DATA_DIR):
                 # Skip hidden files (such as .DS_Store) and non-directory files
-                sim_path = os.path.join(self.SIMULATION_DATA_DIR, sim_id)
+                try:
+                    sim_path = self._get_simulation_dir(sim_id)
+                except ValueError:
+                    continue
                 if sim_id.startswith('.') or not os.path.isdir(sim_path):
                     continue
                 
@@ -487,7 +520,7 @@ class SimulationManager:
             raise ValueError(f"Simulation does not exist: {simulation_id}")
         
         sim_dir = self._get_simulation_dir(simulation_id)
-        profile_path = os.path.join(sim_dir, f"{platform}_profiles.json")
+        profile_path = resolve_resource_path(sim_dir, f'{platform}_profiles.json')
         
         if not os.path.exists(profile_path):
             return []
@@ -498,7 +531,7 @@ class SimulationManager:
     def get_simulation_config(self, simulation_id: str) -> Optional[Dict[str, Any]]:
         """Get simulation config"""
         sim_dir = self._get_simulation_dir(simulation_id)
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        config_path = resolve_resource_path(sim_dir, 'simulation_config.json')
         
         if not os.path.exists(config_path):
             return None
@@ -509,7 +542,7 @@ class SimulationManager:
     def get_run_instructions(self, simulation_id: str) -> Dict[str, str]:
         """Get run instructions"""
         sim_dir = self._get_simulation_dir(simulation_id)
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        config_path = resolve_resource_path(sim_dir, 'simulation_config.json')
         scripts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../scripts'))
         
         return {

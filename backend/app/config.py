@@ -4,6 +4,7 @@ Loads configuration from .env file in project root directory
 """
 
 import os
+import secrets
 from dotenv import load_dotenv
 
 # Load .env file from project root
@@ -21,8 +22,18 @@ class Config:
     """Flask configuration class"""
 
     # Flask configuration
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
-    DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+    DEBUG = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    MIROFISH_BIND_HOST = os.environ.get('MIROFISH_BIND_HOST', '127.0.0.1')
+    MIROFISH_ALLOWED_ORIGINS = [
+        origin.strip()
+        for origin in os.environ.get(
+            'MIROFISH_ALLOWED_ORIGINS',
+            'http://127.0.0.1:3000,http://localhost:3000',
+        ).split(',')
+        if origin.strip()
+    ]
+    MIROFISH_CONTROL_TOKEN = os.environ.get('MIROFISH_CONTROL_TOKEN') or None
 
     # JSON configuration - disable ASCII escaping to display Chinese directly (not as \uXXXX)
     JSON_AS_ASCII = False
@@ -35,7 +46,7 @@ class Config:
     # Neo4j configuration
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
-    NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'mirofish')
+    NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD') or None
 
     # Embedding configuration
     EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nomic-embed-text')
@@ -45,6 +56,18 @@ class Config:
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
     ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
+    READINESS_TIMEOUT_SECONDS = float(
+        os.environ.get('READINESS_TIMEOUT_SECONDS', '2')
+    )
+    READINESS_MIN_FREE_DISK_BYTES = int(
+        os.environ.get('READINESS_MIN_FREE_DISK_BYTES', str(1024 * 1024 * 1024))
+    )
+    READINESS_CACHE_TTL_SECONDS = float(
+        os.environ.get('READINESS_CACHE_TTL_SECONDS', '1')
+    )
+    TASK_WORKER_LEASE_SECONDS = float(
+        os.environ.get('TASK_WORKER_LEASE_SECONDS', '30')
+    )
 
     # Text processing configuration
     DEFAULT_CHUNK_SIZE = 500  # Default chunk size

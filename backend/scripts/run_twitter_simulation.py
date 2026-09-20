@@ -46,6 +46,12 @@ else:
     if os.path.exists(_backend_env):
         load_dotenv(_backend_env)
 
+from simulation_memory import (
+    SimulationMemoryStore,
+    attach_memory_context_to_agent,
+    record_action_memory,
+)
+
 
 import re
 
@@ -580,6 +586,16 @@ class TwitterSimulationRunner:
             model=model,
             available_actions=self.AVAILABLE_ACTIONS,
         )
+
+        agent_names = {
+            cfg.get("agent_id"): cfg.get("entity_name", f"Agent_{cfg.get('agent_id')}")
+            for cfg in self.config.get("agent_configs", [])
+            if cfg.get("agent_id") is not None
+        }
+        for agent_id, agent in self.agent_graph.get_agents():
+            if agent_id not in agent_names:
+                agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
+        memory_store = SimulationMemoryStore(self.simulation_dir, agent_names=agent_names)
         
         # Databasepath
         db_path = self._get_db_path()
@@ -619,6 +635,17 @@ class TwitterSimulationRunner:
                         action_type=ActionType.CREATE_POST,
                         action_args={"content": content}
                     )
+                    record_action_memory(
+                        memory_store,
+                        "twitter",
+                        0,
+                        {
+                            "agent_id": agent_id,
+                            "agent_name": agent_names.get(agent_id, f"Agent_{agent_id}"),
+                            "action_type": "CREATE_POST",
+                            "action_args": {"content": content},
+                        },
+                    )
                 except Exception as e:
                     print(f"  Warning: Unable to create for Agent {agent_id}Create initial posts: {e}")
             
@@ -644,6 +671,9 @@ class TwitterSimulationRunner:
             if not active_agents:
                 continue
             
+            for agent_id, agent in active_agents:
+                attach_memory_context_to_agent(agent, memory_store, agent_id)
+
             # Build action
             actions = {
                 agent: LLMAction()

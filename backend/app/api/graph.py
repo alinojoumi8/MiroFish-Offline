@@ -15,8 +15,10 @@ from ..services.graph_builder import GraphBuilderService
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import get_task_manager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..runtime import current_request_id
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
 
 # Get logger
 logger = get_logger('mirofish.api')
@@ -257,8 +259,7 @@ def generate_ontology():
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -361,7 +362,7 @@ def build_graph():
         storage = _get_storage()
 
         # Create async task
-        task_manager = TaskManager()
+        task_manager = get_task_manager()
         task_id = task_manager.create_task(f"Build graph: {graph_name}")
         logger.info(f"Graph build task created: task_id={task_id}, project_id={project_id}")
         
@@ -371,6 +372,7 @@ def build_graph():
         ProjectManager.save_project(project)
 
         # Start background task
+        failure_request_id = current_request_id()
         def build_task():
             build_logger = get_logger('mirofish.build')
             try:
@@ -479,18 +481,25 @@ def build_graph():
 
             except Exception as e:
                 # Update project status to failed
-                build_logger.error(f"[{task_id}] Graph build failed: {str(e)}")
+                build_logger.error(
+                    "[%s] Graph build failed request_id=%s error=%s",
+                    task_id,
+                    failure_request_id,
+                    str(e),
+                )
                 build_logger.debug(traceback.format_exc())
 
                 project.status = ProjectStatus.FAILED
-                project.error = str(e)
+                project.error = OPERATION_FAILURE_MESSAGE
+                project.error_request_id = failure_request_id
                 ProjectManager.save_project(project)
 
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.FAILED,
-                    message=f"Build failed: {str(e)}",
-                    error=traceback.format_exc()
+                    message=OPERATION_FAILURE_MESSAGE,
+                    error=OPERATION_FAILURE_MESSAGE,
+                    error_request_id=failure_request_id,
                 )
 
         # Start background thread
@@ -509,8 +518,7 @@ def build_graph():
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -521,7 +529,7 @@ def get_task(task_id: str):
     """
     Query task status
     """
-    task = TaskManager().get_task(task_id)
+    task = get_task_manager().get_task(task_id)
 
     if not task:
         return jsonify({
@@ -529,10 +537,13 @@ def get_task(task_id: str):
             "error": f"Task does not exist: {task_id}"
         }), 404
 
-    return jsonify({
+    response = {
         "success": True,
         "data": task.to_dict()
-    })
+    }
+    if task.error_request_id:
+        response["error_request_id"] = task.error_request_id
+    return jsonify(response)
 
 
 @graph_bp.route('/tasks', methods=['GET'])
@@ -540,11 +551,11 @@ def list_tasks():
     """
     List all tasks
     """
-    tasks = TaskManager().list_tasks()
+    tasks = get_task_manager().list_tasks()
     
     return jsonify({
         "success": True,
-        "data": [t.to_dict() for t in tasks],
+        "data": tasks,
         "count": len(tasks)
     })
 
@@ -569,8 +580,7 @@ def get_graph_data(graph_id: str):
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -592,6 +602,5 @@ def delete_graph(graph_id: str):
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500

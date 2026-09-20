@@ -42,13 +42,20 @@ class Neo4jStorage(GraphStorage):
         password: Optional[str] = None,
         embedding_service: Optional[EmbeddingService] = None,
         ner_extractor: Optional[NERExtractor] = None,
+        connection_timeout: Optional[float] = None,
+        connection_acquisition_timeout: Optional[float] = None,
     ):
         self._uri = uri or Config.NEO4J_URI
         self._user = user or Config.NEO4J_USER
         self._password = password or Config.NEO4J_PASSWORD
 
+        driver_options = {}
+        if connection_timeout is not None:
+            driver_options["connection_timeout"] = connection_timeout
+        if connection_acquisition_timeout is not None:
+            driver_options["connection_acquisition_timeout"] = connection_acquisition_timeout
         self._driver = GraphDatabase.driver(
-            self._uri, auth=(self._user, self._password)
+            self._uri, auth=(self._user, self._password), **driver_options
         )
         self._embedding = embedding_service or EmbeddingService()
         self._ner = ner_extractor or NERExtractor()

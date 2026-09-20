@@ -21,6 +21,9 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
+from ..utils.resource_safety import resolve_resource_path, validate_report_id, validate_simulation_id
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
+from ..utils.atomic_state import atomic_write_json, atomic_write_text, resource_lock
 from .graph_tools import (
     GraphToolsService,
     SearchResult,
@@ -47,9 +50,9 @@ class ReportLogger:
         Args:
             report_id: Report ID, used to determine the log file path
         """
-        self.report_id = report_id
-        self.log_file_path = os.path.join(
-            Config.UPLOAD_FOLDER, 'reports', report_id, 'agent_log.jsonl'
+        self.report_id = validate_report_id(report_id)
+        self.log_file_path = resolve_resource_path(
+            os.path.join(Config.UPLOAD_FOLDER, 'reports'), self.report_id, 'agent_log.jsonl'
         )
         self.start_time = datetime.now()
         self._ensure_log_file()
@@ -93,8 +96,12 @@ class ReportLogger:
         }
         
         # Append to JSONL file
-        with open(self.log_file_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        with resource_lock(
+            f"report-log:{self.report_id}",
+            lock_path=os.path.join(os.path.dirname(self.log_file_path), '.report.lock'),
+        ):
+            with open(self.log_file_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
     
     def log_start(self, simulation_id: str, graph_id: str, simulation_requirement: str):
         """Log report generation start"""
@@ -318,9 +325,9 @@ class ReportConsoleLogger:
         Args:
             report_id: Report ID, used to determine the log file path
         """
-        self.report_id = report_id
-        self.log_file_path = os.path.join(
-            Config.UPLOAD_FOLDER, 'reports', report_id, 'console_log.txt'
+        self.report_id = validate_report_id(report_id)
+        self.log_file_path = resolve_resource_path(
+            os.path.join(Config.UPLOAD_FOLDER, 'reports'), self.report_id, 'console_log.txt'
         )
         self._ensure_log_file()
         self._file_handler = None
@@ -450,6 +457,7 @@ class Report:
     created_at: str = ""
     completed_at: str = ""
     error: Optional[str] = None
+    error_request_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -462,7 +470,8 @@ class Report:
             "markdown_content": self.markdown_content,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
-            "error": self.error
+            "error": OPERATION_FAILURE_MESSAGE if self.status == ReportStatus.FAILED else self.error,
+            "error_request_id": self.error_request_id,
         }
 
 
@@ -889,7 +898,8 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        graph_tools: Optional[GraphToolsService] = None
+        graph_tools: Optional[GraphToolsService] = None,
+        failure_request_id: Optional[str] = None,
     ):
         """
         Initialize Report Agent
@@ -904,6 +914,7 @@ class ReportAgent:
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
+        self.failure_request_id = failure_request_id
 
         self.llm = llm_client or LLMClient()
         if graph_tools is None:
@@ -1746,19 +1757,24 @@ class ReportAgent:
             return report
             
         except Exception as e:
-            logger.error(f"reportgeneratefailed: {str(e)}")
+            logger.error(
+                "report generation failed request_id=%s error=%s",
+                self.failure_request_id,
+                str(e),
+            )
             report.status = ReportStatus.FAILED
-            report.error = str(e)
+            report.error = OPERATION_FAILURE_MESSAGE
+            report.error_request_id = self.failure_request_id
             
             # recorderrorlog
             if self.report_logger:
-                self.report_logger.log_error(str(e), "failed")
+                self.report_logger.log_error(OPERATION_FAILURE_MESSAGE, "failed")
             
             # savefailedstatus
             try:
                 ReportManager.save_report(report)
                 ReportManager.update_progress(
-                    report_id, "failed", -1, f"reportgeneratefailed: {str(e)}",
+                    report_id, "failed", -1, OPERATION_FAILURE_MESSAGE,
                     completed_sections=completed_section_titles
                 )
             except Exception:
@@ -1917,7 +1933,7 @@ class ReportManager:
     @classmethod
     def _get_report_folder(cls, report_id: str) -> str:
         """getreportfolderpath"""
-        return os.path.join(cls.REPORTS_DIR, report_id)
+        return resolve_resource_path(cls.REPORTS_DIR, validate_report_id(report_id))
     
     @classmethod
     def _ensure_report_folder(cls, report_id: str) -> str:
@@ -1929,37 +1945,39 @@ class ReportManager:
     @classmethod
     def _get_report_path(cls, report_id: str) -> str:
         """getreportmetainformationfile path"""
-        return os.path.join(cls._get_report_folder(report_id), "meta.json")
+        return resolve_resource_path(cls._get_report_folder(report_id), "meta.json")
     
     @classmethod
     def _get_report_markdown_path(cls, report_id: str) -> str:
         """getcompletereportMarkdownfile path"""
-        return os.path.join(cls._get_report_folder(report_id), "full_report.md")
+        return resolve_resource_path(cls._get_report_folder(report_id), "full_report.md")
     
     @classmethod
     def _get_outline_path(cls, report_id: str) -> str:
         """getoutlinefile path"""
-        return os.path.join(cls._get_report_folder(report_id), "outline.json")
+        return resolve_resource_path(cls._get_report_folder(report_id), "outline.json")
     
     @classmethod
     def _get_progress_path(cls, report_id: str) -> str:
         """getprogressfile path"""
-        return os.path.join(cls._get_report_folder(report_id), "progress.json")
+        return resolve_resource_path(cls._get_report_folder(report_id), "progress.json")
     
     @classmethod
     def _get_section_path(cls, report_id: str, section_index: int) -> str:
         """getSectionMarkdownfile path"""
-        return os.path.join(cls._get_report_folder(report_id), f"section_{section_index:02d}.md")
+        return resolve_resource_path(
+            cls._get_report_folder(report_id), f"section_{section_index:02d}.md"
+        )
     
     @classmethod
     def _get_agent_log_path(cls, report_id: str) -> str:
         """get Agent logsfile path"""
-        return os.path.join(cls._get_report_folder(report_id), "agent_log.jsonl")
+        return resolve_resource_path(cls._get_report_folder(report_id), "agent_log.jsonl")
     
     @classmethod
     def _get_console_log_path(cls, report_id: str) -> str:
         """getconsolelogsfile path"""
-        return os.path.join(cls._get_report_folder(report_id), "console_log.txt")
+        return resolve_resource_path(cls._get_report_folder(report_id), "console_log.txt")
     
     @classmethod
     def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
@@ -2093,8 +2111,11 @@ class ReportManager:
         """
         cls._ensure_report_folder(report_id)
         
-        with open(cls._get_outline_path(report_id), 'w', encoding='utf-8') as f:
-            json.dump(outline.to_dict(), f, ensure_ascii=False, indent=2)
+        with resource_lock(
+            f"report:{report_id}",
+            lock_path=os.path.join(cls._get_report_folder(report_id), '.report.lock'),
+        ):
+            atomic_write_json(cls._get_outline_path(report_id), outline.to_dict())
         
         logger.info(f"outlinesaved: {report_id}")
     
@@ -2128,9 +2149,12 @@ class ReportManager:
 
         # savefile
         file_suffix = f"section_{section_index:02d}.md"
-        file_path = os.path.join(cls._get_report_folder(report_id), file_suffix)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(md_content)
+        file_path = resolve_resource_path(cls._get_report_folder(report_id), file_suffix)
+        with resource_lock(
+            f"report:{report_id}",
+            lock_path=os.path.join(cls._get_report_folder(report_id), '.report.lock'),
+        ):
+            atomic_write_text(file_path, md_content)
 
         logger.info(f"Sectionsaved: {report_id}/{file_suffix}")
         return file_path
@@ -2229,8 +2253,11 @@ class ReportManager:
             "updated_at": datetime.now().isoformat()
         }
         
-        with open(cls._get_progress_path(report_id), 'w', encoding='utf-8') as f:
-            json.dump(progress_data, f, ensure_ascii=False, indent=2)
+        with resource_lock(
+            f"report:{report_id}",
+            lock_path=os.path.join(cls._get_report_folder(report_id), '.report.lock'),
+        ):
+            atomic_write_json(cls._get_progress_path(report_id), progress_data)
     
     @classmethod
     def get_progress(cls, report_id: str) -> Optional[Dict[str, Any]]:
@@ -2241,7 +2268,10 @@ class ReportManager:
             return None
         
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            progress = json.load(f)
+        if progress.get('status') == ReportStatus.FAILED.value:
+            progress['message'] = OPERATION_FAILURE_MESSAGE
+        return progress
     
     @classmethod
     def get_generated_sections(cls, report_id: str) -> List[Dict[str, Any]]:
@@ -2298,8 +2328,11 @@ class ReportManager:
         
         # saveComplete report
         full_path = cls._get_report_markdown_path(report_id)
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(md_content)
+        with resource_lock(
+            f"report:{report_id}",
+            lock_path=os.path.join(cls._get_report_folder(report_id), '.report.lock'),
+        ):
+            atomic_write_text(full_path, md_content)
         
         logger.info(f"completereporthasassemble: {report_id}")
         return md_content
@@ -2435,18 +2468,20 @@ class ReportManager:
         """SavereportmetainformationandcompleteReport"""
         cls._ensure_report_folder(report.report_id)
         
-        # savemetainformationJSON
-        with open(cls._get_report_path(report.report_id), 'w', encoding='utf-8') as f:
-            json.dump(report.to_dict(), f, ensure_ascii=False, indent=2)
-        
-        # saveoutline
-        if report.outline:
-            cls.save_outline(report.report_id, report.outline)
-        
-        # saveCompleteMarkdownReport
-        if report.markdown_content:
-            with open(cls._get_report_markdown_path(report.report_id), 'w', encoding='utf-8') as f:
-                f.write(report.markdown_content)
+        with resource_lock(
+            f"report:{report.report_id}",
+            lock_path=os.path.join(
+                cls._get_report_folder(report.report_id), '.report.lock'
+            ),
+        ):
+            atomic_write_json(cls._get_report_path(report.report_id), report.to_dict())
+            if report.outline:
+                cls.save_outline(report.report_id, report.outline)
+            if report.markdown_content:
+                atomic_write_text(
+                    cls._get_report_markdown_path(report.report_id),
+                    report.markdown_content,
+                )
         
         logger.info(f"reportsaved: {report.report_id}")
     
@@ -2457,7 +2492,7 @@ class ReportManager:
         
         if not os.path.exists(path):
             # backward compatibleformat：Checkdirectlystored inreportsunder directoryfile
-            old_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
+            old_path = resolve_resource_path(cls.REPORTS_DIR, f"{report_id}.json")
             if os.path.exists(old_path):
                 path = old_path
             else:
@@ -2500,24 +2535,38 @@ class ReportManager:
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),
             completed_at=data.get('completed_at', ''),
-            error=data.get('error')
+            error=(
+                OPERATION_FAILURE_MESSAGE
+                if data.get('status') == ReportStatus.FAILED.value and data.get('error')
+                else data.get('error')
+            ),
+            error_request_id=data.get('error_request_id'),
         )
     
     @classmethod
     def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
         """based onsimulationIDgetreport"""
+        validate_simulation_id(simulation_id)
         cls._ensure_reports_dir()
         
         for item in os.listdir(cls.REPORTS_DIR):
-            item_path = os.path.join(cls.REPORTS_DIR, item)
+            report_id = item[:-5] if item.endswith('.json') else item
+            try:
+                validate_report_id(report_id)
+                item_path = (
+                    resolve_resource_path(cls.REPORTS_DIR, item)
+                    if item.endswith('.json')
+                    else cls._get_report_folder(report_id)
+                )
+            except ValueError:
+                continue
             # newformat：filefolder
             if os.path.isdir(item_path):
-                report = cls.get_report(item)
+                report = cls.get_report(report_id)
                 if report and report.simulation_id == simulation_id:
                     return report
             # backward compatibleformat：JSONfile
             elif item.endswith('.json'):
-                report_id = item[:-5]
                 report = cls.get_report(report_id)
                 if report and report.simulation_id == simulation_id:
                     return report
@@ -2527,20 +2576,30 @@ class ReportManager:
     @classmethod
     def list_reports(cls, simulation_id: Optional[str] = None, limit: int = 50) -> List[Report]:
         """columnappearreport"""
+        if simulation_id is not None:
+            validate_simulation_id(simulation_id)
         cls._ensure_reports_dir()
         
         reports = []
         for item in os.listdir(cls.REPORTS_DIR):
-            item_path = os.path.join(cls.REPORTS_DIR, item)
+            report_id = item[:-5] if item.endswith('.json') else item
+            try:
+                validate_report_id(report_id)
+                item_path = (
+                    resolve_resource_path(cls.REPORTS_DIR, item)
+                    if item.endswith('.json')
+                    else cls._get_report_folder(report_id)
+                )
+            except ValueError:
+                continue
             # newformat：filefolder
             if os.path.isdir(item_path):
-                report = cls.get_report(item)
+                report = cls.get_report(report_id)
                 if report:
                     if simulation_id is None or report.simulation_id == simulation_id:
                         reports.append(report)
             # backward compatibleformat：JSONfile
             elif item.endswith('.json'):
-                report_id = item[:-5]
                 report = cls.get_report(report_id)
                 if report:
                     if simulation_id is None or report.simulation_id == simulation_id:
@@ -2566,8 +2625,9 @@ class ReportManager:
         
         # backward compatibleformat：Deleteseparatefile
         deleted = False
-        old_json_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.json")
-        old_md_path = os.path.join(cls.REPORTS_DIR, f"{report_id}.md")
+        validate_report_id(report_id)
+        old_json_path = resolve_resource_path(cls.REPORTS_DIR, f"{report_id}.json")
+        old_md_path = resolve_resource_path(cls.REPORTS_DIR, f"{report_id}.md")
         
         if os.path.exists(old_json_path):
             os.remove(old_json_path)

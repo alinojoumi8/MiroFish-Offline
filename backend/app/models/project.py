@@ -12,6 +12,9 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
+from ..utils.resource_safety import resolve_resource_path, validate_project_id
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
+from ..utils.atomic_state import atomic_write_json, atomic_write_text, resource_lock
 
 
 class ProjectStatus(str, Enum):
@@ -51,6 +54,7 @@ class Project:
 
     # Error information
     error: Optional[str] = None
+    error_request_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -69,7 +73,8 @@ class Project:
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
-            "error": self.error
+            "error": OPERATION_FAILURE_MESSAGE if self.status == ProjectStatus.FAILED else self.error,
+            "error_request_id": self.error_request_id,
         }
     
     @classmethod
@@ -94,7 +99,12 @@ class Project:
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
-            error=data.get('error')
+            error=(
+                OPERATION_FAILURE_MESSAGE
+                if status == ProjectStatus.FAILED and data.get('error')
+                else data.get('error')
+            ),
+            error_request_id=data.get('error_request_id'),
         )
 
 
@@ -112,22 +122,24 @@ class ProjectManager:
     @classmethod
     def _get_project_dir(cls, project_id: str) -> str:
         """Get project directory path"""
-        return os.path.join(cls.PROJECTS_DIR, project_id)
+        return resolve_resource_path(
+            cls.PROJECTS_DIR, validate_project_id(project_id)
+        )
 
     @classmethod
     def _get_project_meta_path(cls, project_id: str) -> str:
         """Get project metadata file path"""
-        return os.path.join(cls._get_project_dir(project_id), 'project.json')
+        return resolve_resource_path(cls._get_project_dir(project_id), 'project.json')
 
     @classmethod
     def _get_project_files_dir(cls, project_id: str) -> str:
         """Get project file storage directory"""
-        return os.path.join(cls._get_project_dir(project_id), 'files')
+        return resolve_resource_path(cls._get_project_dir(project_id), 'files')
 
     @classmethod
     def _get_project_text_path(cls, project_id: str) -> str:
         """Get project extracted text storage path"""
-        return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
+        return resolve_resource_path(cls._get_project_dir(project_id), 'extracted_text.txt')
 
     @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
@@ -167,11 +179,14 @@ class ProjectManager:
     @classmethod
     def save_project(cls, project: Project) -> None:
         """Save project metadata"""
-        project.updated_at = datetime.now().isoformat()
-        meta_path = cls._get_project_meta_path(project.project_id)
-
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+        project_dir = cls._get_project_dir(project.project_id)
+        with resource_lock(
+            f"project:{project.project_id}",
+            lock_path=os.path.join(project_dir, '.state.lock'),
+        ):
+            project.updated_at = datetime.now().isoformat()
+            meta_path = cls._get_project_meta_path(project.project_id)
+            atomic_write_json(meta_path, project.to_dict())
 
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:
@@ -185,12 +200,14 @@ class ProjectManager:
             Project object, or None if not found
         """
         meta_path = cls._get_project_meta_path(project_id)
-
-        if not os.path.exists(meta_path):
-            return None
-
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with resource_lock(
+            f"project:{project_id}",
+            lock_path=os.path.join(cls._get_project_dir(project_id), '.state.lock'),
+        ):
+            if not os.path.exists(meta_path):
+                return None
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
 
         return Project.from_dict(data)
 
@@ -209,7 +226,10 @@ class ProjectManager:
 
         projects = []
         for project_id in os.listdir(cls.PROJECTS_DIR):
-            project = cls.get_project(project_id)
+            try:
+                project = cls.get_project(project_id)
+            except ValueError:
+                continue
             if project:
                 projects.append(project)
 
@@ -256,7 +276,7 @@ class ProjectManager:
         # Generate safe filename
         ext = os.path.splitext(original_filename)[1].lower()
         safe_filename = f"{uuid.uuid4().hex[:8]}{ext}"
-        file_path = os.path.join(files_dir, safe_filename)
+        file_path = resolve_resource_path(files_dir, safe_filename)
 
         # Save file
         file_storage.save(file_path)
@@ -274,9 +294,13 @@ class ProjectManager:
     @classmethod
     def save_extracted_text(cls, project_id: str, text: str) -> None:
         """Save extracted text"""
-        text_path = cls._get_project_text_path(project_id)
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(text)
+        project_dir = cls._get_project_dir(project_id)
+        with resource_lock(
+            f"project:{project_id}",
+            lock_path=os.path.join(project_dir, '.state.lock'),
+        ):
+            text_path = cls._get_project_text_path(project_id)
+            atomic_write_text(text_path, text)
 
     @classmethod
     def get_extracted_text(cls, project_id: str) -> Optional[str]:
@@ -297,9 +321,12 @@ class ProjectManager:
         if not os.path.exists(files_dir):
             return []
 
-        return [
-            os.path.join(files_dir, f)
-            for f in os.listdir(files_dir)
-            if os.path.isfile(os.path.join(files_dir, f))
-        ]
-
+        files = []
+        for filename in os.listdir(files_dir):
+            try:
+                file_path = resolve_resource_path(files_dir, filename)
+            except ValueError:
+                continue
+            if os.path.isfile(file_path):
+                files.append(file_path)
+        return files

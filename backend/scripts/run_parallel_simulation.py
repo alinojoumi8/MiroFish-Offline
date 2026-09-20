@@ -156,6 +156,11 @@ def init_logging_for_simulation(simulation_dir: str):
 
 
 from action_logger import SimulationLogManager, PlatformActionLogger
+from simulation_memory import (
+    SimulationMemoryStore,
+    attach_memory_context_to_agent,
+    record_action_memory,
+)
 
 try:
     from camel.models import ModelFactory
@@ -654,6 +659,11 @@ def get_agent_names_from_config(config: Dict[str, Any]) -> Dict[int, str]:
     return agent_names
 
 
+def create_memory_store(simulation_dir: str, agent_names: Dict[int, str]) -> SimulationMemoryStore:
+    """Create the structured memory store shared by both platforms."""
+    return SimulationMemoryStore(simulation_dir, agent_names=agent_names)
+
+
 def fetch_new_actions_from_db(
     db_path: str,
     last_rowid: int,
@@ -1147,6 +1157,8 @@ async def run_twitter_simulation(
     for agent_id, agent in result.agent_graph.get_agents():
         if agent_id not in agent_names:
             agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
+
+    memory_store = create_memory_store(simulation_dir, agent_names)
     
     db_path = os.path.join(simulation_dir, "twitter_simulation.db")
     if os.path.exists(db_path):
@@ -1189,16 +1201,24 @@ async def run_twitter_simulation(
                     action_args={"content": content}
                 )
                 
+                action_data = {
+                    "agent_id": agent_id,
+                    "agent_name": agent_names.get(agent_id, f"Agent_{agent_id}"),
+                    "action_type": "CREATE_POST",
+                    "action_args": {"content": content},
+                }
+
                 if action_logger:
                     action_logger.log_action(
                         round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
+                        agent_id=action_data["agent_id"],
+                        agent_name=action_data["agent_name"],
+                        action_type=action_data["action_type"],
+                        action_args=action_data["action_args"]
                     )
-                    total_actions += 1
-                    initial_action_count += 1
+                record_action_memory(memory_store, "twitter", 0, action_data)
+                total_actions += 1
+                initial_action_count += 1
             except Exception:
                 pass
         
@@ -1250,6 +1270,9 @@ async def run_twitter_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
+        for agent_id, agent in active_agents:
+            attach_memory_context_to_agent(agent, memory_store, agent_id)
+
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
         
@@ -1268,8 +1291,9 @@ async def run_twitter_simulation(
                     action_type=action_data['action_type'],
                     action_args=action_data['action_args']
                 )
-                total_actions += 1
-                round_action_count += 1
+            record_action_memory(memory_store, "twitter", round_num + 1, action_data)
+            total_actions += 1
+            round_action_count += 1
         
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
@@ -1338,6 +1362,8 @@ async def run_reddit_simulation(
     for agent_id, agent in result.agent_graph.get_agents():
         if agent_id not in agent_names:
             agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
+
+    memory_store = create_memory_store(simulation_dir, agent_names)
     
     db_path = os.path.join(simulation_dir, "reddit_simulation.db")
     if os.path.exists(db_path):
@@ -1388,16 +1414,24 @@ async def run_reddit_simulation(
                         action_args={"content": content}
                     )
                 
+                action_data = {
+                    "agent_id": agent_id,
+                    "agent_name": agent_names.get(agent_id, f"Agent_{agent_id}"),
+                    "action_type": "CREATE_POST",
+                    "action_args": {"content": content},
+                }
+
                 if action_logger:
                     action_logger.log_action(
                         round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
+                        agent_id=action_data["agent_id"],
+                        agent_name=action_data["agent_name"],
+                        action_type=action_data["action_type"],
+                        action_args=action_data["action_args"]
                     )
-                    total_actions += 1
-                    initial_action_count += 1
+                record_action_memory(memory_store, "reddit", 0, action_data)
+                total_actions += 1
+                initial_action_count += 1
             except Exception:
                 pass
         
@@ -1449,6 +1483,9 @@ async def run_reddit_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
+        for agent_id, agent in active_agents:
+            attach_memory_context_to_agent(agent, memory_store, agent_id)
+
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
         
@@ -1467,8 +1504,9 @@ async def run_reddit_simulation(
                     action_type=action_data['action_type'],
                     action_args=action_data['action_args']
                 )
-                total_actions += 1
-                round_action_count += 1
+            record_action_memory(memory_store, "reddit", round_num + 1, action_data)
+            total_actions += 1
+            round_action_count += 1
         
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)

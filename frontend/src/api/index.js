@@ -2,12 +2,19 @@ import axios from 'axios'
 
 // Create axios instance
 const service = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 300000, // 5 minute timeout (ontology generation may require longer time)
   headers: {
     'Content-Type': 'application/json'
   }
 })
+
+export const extractApiErrorMessage = (payload, fallback = 'Error') => {
+  if (payload?.error && typeof payload.error === 'object') {
+    return payload.error.message || fallback
+  }
+  return payload?.error || payload?.message || fallback
+}
 
 // Request interceptor
 service.interceptors.request.use(
@@ -27,14 +34,17 @@ service.interceptors.response.use(
 
     // If the returned status code is not success, throw error
     if (!res.success && res.success !== undefined) {
-      console.error('API Error:', res.error || res.message || 'Unknown error')
-      return Promise.reject(new Error(res.error || res.message || 'Error'))
+      const message = extractApiErrorMessage(res)
+      console.error('API Error:', message)
+      return Promise.reject(new Error(message))
     }
 
     return res
   },
   error => {
-    console.error('Response error:', error)
+    const apiPayload = error.response?.data
+    const apiMessage = extractApiErrorMessage(apiPayload, error.message)
+    console.error('Response error:', apiMessage)
 
     // Handle timeout
     if (error.code === 'ECONNABORTED' && error.message.includes('timeout')) {
@@ -46,6 +56,9 @@ service.interceptors.response.use(
       console.error('Network error - please check your connection')
     }
 
+    if (apiPayload?.error) {
+      return Promise.reject(new Error(apiMessage))
+    }
     return Promise.reject(error)
   }
 )
