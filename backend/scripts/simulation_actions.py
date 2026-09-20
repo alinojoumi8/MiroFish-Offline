@@ -35,12 +35,12 @@ def fetch_new_actions_from_db(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Get new action records from Database and supplement complete context information
-    
+
     Args:
         db_path: Database file path
         last_rowid: Maximum rowid value from last read (use rowid instead of created_at because different platforms have different created_at formats)
         agent_names: agent_id -> agent_name mapping
-        
+
     Returns:
         (actions_list, new_last_rowid)
         - actions_list: List of actions, each element contains agent_id, agent_name, action_type, action_args (including context information)
@@ -48,14 +48,14 @@ def fetch_new_actions_from_db(
     """
     actions = []
     new_last_rowid = last_rowid
-    
+
     if not os.path.exists(db_path):
         return actions, new_last_rowid
-    
+
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
+
         # Use rowid to track processed records (rowid is SQLite's built-in auto-increment field)
         # This avoids created_at format differences (Twitter uses integers, Reddit uses datetime strings)
         cursor.execute("""
@@ -64,21 +64,21 @@ def fetch_new_actions_from_db(
             WHERE rowid > ?
             ORDER BY rowid ASC
         """, (last_rowid,))
-        
+
         for rowid, user_id, action, info_json in cursor.fetchall():
             # Update maximum rowid
             new_last_rowid = rowid
-            
+
             # Filter non-core actions
             if action in FILTERED_ACTIONS:
                 continue
-            
+
             # Parse action arguments
             try:
                 action_args = json.loads(info_json) if info_json else {}
             except json.JSONDecodeError:
                 action_args = {}
-            
+
             # Simplify action_args, keep only key fields (keep full content, no truncation)
             simplified_args = {}
             if 'content' in action_args:
@@ -99,24 +99,24 @@ def fetch_new_actions_from_db(
                 simplified_args['like_id'] = action_args['like_id']
             if 'dislike_id' in action_args:
                 simplified_args['dislike_id'] = action_args['dislike_id']
-            
+
             # Convert action type names
             action_type = ACTION_TYPE_MAP.get(action, action.upper())
-            
+
             # Supplement context information (post content, usernames, etc.)
             _enrich_action_context(cursor, action_type, simplified_args, agent_names)
-            
+
             actions.append({
                 'agent_id': user_id,
                 'agent_name': agent_names.get(user_id, f'Agent_{user_id}'),
                 'action_type': action_type,
                 'action_args': simplified_args,
             })
-        
+
         conn.close()
     except Exception as e:
         print(f"Failed to read Database actions: {e}")
-    
+
     return actions, new_last_rowid
 
 
@@ -128,7 +128,7 @@ def _enrich_action_context(
 ) -> None:
     """
     for actionSupplement context information (post content, usernames, etc.)
-    
+
     Args:
         cursor: Database cursor
         action_type: Action type
@@ -144,7 +144,7 @@ def _enrich_action_context(
                 if post_info:
                     action_args['post_content'] = post_info.get('content', '')
                     action_args['post_author_name'] = post_info.get('author_name', '')
-        
+
         # Repost: supplement original post content and author
         elif action_type == 'REPOST':
             new_post_id = action_args.get('new_post_id')
@@ -160,18 +160,18 @@ def _enrich_action_context(
                     if original_info:
                         action_args['original_content'] = original_info.get('content', '')
                         action_args['original_author_name'] = original_info.get('author_name', '')
-        
+
         # Quote post: supplement original post content, author, and quote comment
         elif action_type == 'QUOTE_POST':
             quoted_id = action_args.get('quoted_id')
             new_post_id = action_args.get('new_post_id')
-            
+
             if quoted_id:
                 original_info = _get_post_info(cursor, quoted_id, agent_names)
                 if original_info:
                     action_args['original_content'] = original_info.get('content', '')
                     action_args['original_author_name'] = original_info.get('author_name', '')
-            
+
             # Get quote post comment content (quote_content)
             if new_post_id:
                 cursor.execute("""
@@ -180,7 +180,7 @@ def _enrich_action_context(
                 row = cursor.fetchone()
                 if row and row[0]:
                     action_args['quote_content'] = row[0]
-        
+
         # Follow user: supplement followed user name
         elif action_type == 'FOLLOW':
             follow_id = action_args.get('follow_id')
@@ -195,7 +195,7 @@ def _enrich_action_context(
                     target_name = _get_user_name(cursor, followee_id, agent_names)
                     if target_name:
                         action_args['target_user_name'] = target_name
-        
+
         # Mute user: supplement muted user name
         elif action_type == 'MUTE':
             # Get user_id or target_id from action_args
@@ -204,7 +204,7 @@ def _enrich_action_context(
                 target_name = _get_user_name(cursor, target_id, agent_names)
                 if target_name:
                     action_args['target_user_name'] = target_name
-        
+
         # Like/dislike comment: supplement comment content and author
         elif action_type in ('LIKE_COMMENT', 'DISLIKE_COMMENT'):
             comment_id = action_args.get('comment_id')
@@ -213,7 +213,7 @@ def _enrich_action_context(
                 if comment_info:
                     action_args['comment_content'] = comment_info.get('content', '')
                     action_args['comment_author_name'] = comment_info.get('author_name', '')
-        
+
         # Post comment: supplement commented post information
         elif action_type == 'CREATE_COMMENT':
             post_id = action_args.get('post_id')
@@ -222,7 +222,7 @@ def _enrich_action_context(
                 if post_info:
                     action_args['post_content'] = post_info.get('content', '')
                     action_args['post_author_name'] = post_info.get('author_name', '')
-    
+
     except Exception as e:
         # Context supplement failure does not affect main process
         print(f"Failed to supplement action context: {e}")
@@ -235,12 +235,12 @@ def _get_post_info(
 ) -> Optional[Dict[str, str]]:
     """
     Get post information
-    
+
     Args:
         cursor: Database cursor
         post_id: Post ID
         agent_names: agent_id -> agent_name mapping
-        
+
     Returns:
         Dictionary containing content and author_name, or None
     """
@@ -256,7 +256,7 @@ def _get_post_info(
             content = row[0] or ''
             user_id = row[1]
             agent_id = row[2]
-            
+
             # Preferentially use name from agent_names
             author_name = ''
             if agent_id is not None and agent_id in agent_names:
@@ -267,7 +267,7 @@ def _get_post_info(
                 user_row = cursor.fetchone()
                 if user_row:
                     author_name = user_row[0] or user_row[1] or ''
-            
+
             return {'content': content, 'author_name': author_name}
     except Exception:
         pass
@@ -281,12 +281,12 @@ def _get_user_name(
 ) -> Optional[str]:
     """
     Get user name
-    
+
     Args:
         cursor: Database cursor
         user_id: User ID
         agent_names: agent_id -> agent_name mapping
-        
+
     Returns:
         User name, or None
     """
@@ -299,7 +299,7 @@ def _get_user_name(
             agent_id = row[0]
             name = row[1]
             user_name = row[2]
-            
+
             # Preferentially use name from agent_names
             if agent_id is not None and agent_id in agent_names:
                 return agent_names[agent_id]
@@ -316,12 +316,12 @@ def _get_comment_info(
 ) -> Optional[Dict[str, str]]:
     """
     Get comment information
-    
+
     Args:
         cursor: Database cursor
         comment_id: Comment ID
         agent_names: agent_id -> agent_name mapping
-        
+
     Returns:
         Dictionary containing content and author_name, or None
     """
@@ -337,7 +337,7 @@ def _get_comment_info(
             content = row[0] or ''
             user_id = row[1]
             agent_id = row[2]
-            
+
             # Preferentially use name from agent_names
             author_name = ''
             if agent_id is not None and agent_id in agent_names:
@@ -348,10 +348,8 @@ def _get_comment_info(
                 user_row = cursor.fetchone()
                 if user_row:
                     author_name = user_row[0] or user_row[1] or ''
-            
+
             return {'content': content, 'author_name': author_name}
     except Exception:
         pass
     return None
-
-
