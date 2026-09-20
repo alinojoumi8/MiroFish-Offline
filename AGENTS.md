@@ -20,7 +20,7 @@ Use 4-space indentation for Python and 2-space indentation in Vue templates/styl
 
 ## Testing Guidelines
 
-Backend dev dependencies include `pytest` and `pytest-asyncio`; add new tests under `backend/tests/` as `test_*.py` when adding backend behavior. Keep script-style checks in `backend/scripts/` only when they validate external formats or manual workflows. No frontend test runner is currently configured, so verify UI changes with `npm run build` and a local Vite run.
+Backend dev dependencies include `pytest` and `pytest-asyncio`; add new tests under `backend/tests/` as `test_*.py` when adding backend behavior. Keep script-style checks in `backend/scripts/` only when they validate external formats or manual workflows. Add frontend tests under `frontend/tests/` and run `cd frontend && npm test` using Vitest. Verify UI changes with `npm run build`.
 
 ## Commit & Pull Request Guidelines
 
@@ -28,4 +28,4 @@ Recent history uses concise subjects with Conventional Commit-style prefixes, fo
 
 ## Security & Configuration Tips
 
-Copy `.env.example` to `.env` for local settings. Do not commit secrets, model API keys, Neo4j passwords, generated uploads, or local database volumes.
+Run `python3 scripts/init_local_env.py` to create `.env` from `.env.example` and generate required local secrets. Do not commit secrets, model API keys, Neo4j passwords, generated uploads, or local database volumes.

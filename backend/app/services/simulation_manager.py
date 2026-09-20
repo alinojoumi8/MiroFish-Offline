@@ -171,6 +171,8 @@ class SimulationManager:
         """Load simulation state from file"""
         sim_dir = self._get_simulation_dir(simulation_id)
         state_file = resolve_resource_path(sim_dir, 'state.json')
+        if not os.path.exists(state_file):
+            return None
         with resource_lock(
             f"simulation:{simulation_id}",
             lock_path=os.path.join(sim_dir, '.state.lock'),

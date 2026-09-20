@@ -49,6 +49,7 @@ def test_twitter_csv_has_oasis_header_order_and_profile_values(tmp_path, profile
             "follower_count",
             "statuses_count",
             "created_at",
+            "username", "user_char", "description",
         ]
         assert next(reader) == {
             "user_id": "7",
@@ -59,6 +60,9 @@ def test_twitter_csv_has_oasis_header_order_and_profile_values(tmp_path, profile
             "follower_count": "22",
             "statuses_count": "33",
             "created_at": "2024-01-02",
+            "username": "alice_handle",
+            "user_char": "Alice bio Alice persona",
+            "description": "Alice bio",
         }
 
 
@@ -109,6 +113,7 @@ def test_profile_serializers_support_empty_input(tmp_path):
             "follower_count",
             "statuses_count",
             "created_at",
+            "username", "user_char", "description",
         ]
     assert json.loads(reddit_path.read_text(encoding="utf-8")) == []
 

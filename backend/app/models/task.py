@@ -1,6 +1,7 @@
 """Durable, lease-owned status tracking for background tasks."""
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -503,6 +504,11 @@ class TaskManager:
             return len(task_ids)
 
 
+_fallback_manager = None
+_fallback_pid = None
+_fallback_lock = threading.Lock()
+
+
 def get_task_manager():
     """Return the active Flask application's manager, or a local fallback."""
     try:
@@ -512,4 +518,9 @@ def get_task_manager():
             return current_app.extensions["task_manager"]
     except (ImportError, KeyError):
         pass
-    return TaskManager()
+    global _fallback_manager, _fallback_pid
+    with _fallback_lock:
+        if _fallback_manager is None or _fallback_pid != os.getpid():
+            _fallback_manager = TaskManager()
+            _fallback_pid = os.getpid()
+        return _fallback_manager

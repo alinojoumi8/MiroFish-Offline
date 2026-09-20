@@ -70,3 +70,37 @@ def test_cross_platform_retrieval_includes_actor_and_target_memories(tmp_path):
     assert "Bob liked Alice's post" in memories[0]["text"]
     assert "[reddit]" in context
     assert "[twitter]" in context
+
+
+def test_cached_memory_reads_cross_platform_appends_once(tmp_path, monkeypatch):
+    import scripts.simulation_memory as module
+    first = module.SimulationMemoryStore(tmp_path)
+    second = module.SimulationMemoryStore(tmp_path)
+    assert first.get_agent_memories(1) == []
+    first.add_action('twitter', 1, 1, 'Alice', 'CREATE_POST', {'content': 'One'})
+    calls = []
+    original_loads = module.json.loads
+    def counted_loads(value):
+        calls.append(value)
+        return original_loads(value)
+    monkeypatch.setattr(module.json, 'loads', counted_loads)
+    assert len(first.get_agent_memories(1)) == 1
+    assert len(first.get_agent_memories(1)) == 1
+    assert len(calls) == 1
+    second.add_action('reddit', 2, 1, 'Alice', 'CREATE_POST', {'content': 'Two'})
+    assert [r['content'] for r in first.get_agent_memories(1)] == ['Two', 'One']
+    assert len(calls) == 2
+
+
+def test_memory_cache_waits_for_complete_line_and_handles_replacement(tmp_path):
+    import scripts.simulation_memory as module
+    store = module.SimulationMemoryStore(tmp_path)
+    store.memory_path.write_bytes(b'{"participants": [1], "content": "partial"')
+    assert store.get_agent_memories(1) == []
+    with store.memory_path.open('ab') as handle:
+        handle.write(b'}\n')
+    assert store.get_agent_memories(1)[0]['content'] == 'partial'
+    replacement = tmp_path / 'replacement'
+    replacement.write_text('{"participants": [1], "content": "replacement"}\n')
+    replacement.replace(store.memory_path)
+    assert [r['content'] for r in store.get_agent_memories(1)] == ['replacement']

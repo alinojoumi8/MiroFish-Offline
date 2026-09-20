@@ -11,11 +11,15 @@ const props = defineProps({
     type: [String, Number],
     default: ''
   },
+  stripLeadingH2: {
+    type: Boolean,
+    default: false
+  },
   tag: {
     type: String,
     default: 'div'
   }
 })
 
-const html = computed(() => renderSafeMarkdown(props.content))
+const html = computed(() => renderSafeMarkdown(props.content, { stripLeadingH2: props.stripLeadingH2 }))
 </script>

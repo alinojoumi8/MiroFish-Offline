@@ -2,8 +2,12 @@ import { describe, expect, test } from 'vitest'
 import { renderSafeMarkdown } from '../src/utils/safeMarkdown'
 
 describe('renderSafeMarkdown', () => {
+  test('preserves leading headings in chat messages and answers', () => {
+    expect(renderSafeMarkdown('## Answer heading\n\nBody')).toContain('Answer heading</h2>')
+  })
+
   test('omits a leading level-2 section heading already rendered by the parent', () => {
-    const html = renderSafeMarkdown('## Duplicate section title\n\nBody content')
+    const html = renderSafeMarkdown('## Duplicate section title\n\nBody content', { stripLeadingH2: true })
 
     expect(html).not.toContain('Duplicate section title')
     expect(html).toContain('<p class="md-p">Body content</p>')

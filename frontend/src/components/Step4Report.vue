@@ -48,7 +48,7 @@
               
               <div class="section-body" v-show="!collapsedSections.has(idx)">
                 <!-- Completed Content -->
-                <SafeMarkdown v-if="generatedSections[idx + 1]" class="generated-content" :content="generatedSections[idx + 1]" />
+                <SafeMarkdown v-if="generatedSections[idx + 1]" class="generated-content" strip-leading-h2 :content="generatedSections[idx + 1]" />
                 
                 <!-- Loading State -->
                 <div v-else-if="currentSectionIndex === idx + 1" class="loading-state">

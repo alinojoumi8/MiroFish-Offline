@@ -22,6 +22,7 @@ TWITTER_FIELDS = [
     "follower_count",
     "statuses_count",
     "created_at",
+    "username", "user_char", "description",
 ]
 REDDIT_REQUIRED_FIELDS = [
     "user_id",

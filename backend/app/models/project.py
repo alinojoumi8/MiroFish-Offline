@@ -200,6 +200,8 @@ class ProjectManager:
             Project object, or None if not found
         """
         meta_path = cls._get_project_meta_path(project_id)
+        if not os.path.exists(meta_path):
+            return None
         with resource_lock(
             f"project:{project_id}",
             lock_path=os.path.join(cls._get_project_dir(project_id), '.state.lock'),

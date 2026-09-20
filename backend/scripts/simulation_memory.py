@@ -19,6 +19,18 @@ MEMORY_CONTEXT_HEADER = "### Recent simulation memory"
 MEMORY_CONTEXT_FOOTER = "### End recent simulation memory"
 
 
+def record_round_memories(memory_store, platform, round_num, db_path, last_rowid, agent_names):
+    """Persist newly completed OASIS actions and return the consumed trace cursor."""
+    try:
+        from .simulation_actions import fetch_new_actions_from_db
+    except ImportError:
+        from simulation_actions import fetch_new_actions_from_db
+    actions, cursor = fetch_new_actions_from_db(db_path, last_rowid, agent_names)
+    for action in actions:
+        record_action_memory(memory_store, platform, round_num, action)
+    return cursor
+
+
 def record_action_memory(
     memory_store: Optional["SimulationMemoryStore"],
     platform: str,
@@ -70,6 +82,29 @@ def attach_memory_context_to_agent(
     if not context:
         return False
 
+    # OASIS uses CAMEL BaseMessage objects and serializes messages into memory.
+    # Updating a profile attribute alone does not change the model's context.
+    from camel.memories import ChatHistoryMemory
+    from camel.messages import BaseMessage
+    from camel.types import OpenAIBackendRole
+
+    message = getattr(agent, "system_message", None)
+    memory = getattr(agent, "memory", None)
+    if isinstance(message, BaseMessage) and isinstance(memory, ChatHistoryMemory):
+        records = [item.memory_record for item in memory.retrieve()]
+        system_records = [
+            record for record in records
+            if record.role_at_backend == OpenAIBackendRole.SYSTEM
+        ]
+        if not system_records:
+            return False
+        content = replace_memory_context(message.content, context)
+        message.content = content
+        system_records[0].message = message
+        memory.clear()
+        memory.write_records(records)
+        return True
+
     for attr in ("persona", "profile", "bio", "description", "user_char", "system_message"):
         value = getattr(agent, attr, None)
         if isinstance(value, str):
@@ -82,8 +117,7 @@ def attach_memory_context_to_agent(
                     value[key] = replace_memory_context(nested, context)
                     return True
 
-    setattr(agent, "simulation_memory_context", context)
-    return True
+    return False
 
 
 class SimulationMemoryStore:
@@ -103,6 +137,9 @@ class SimulationMemoryStore:
             if name
         }
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self._records = []
+        self._read_offset = 0
+        self._file_identity = None
 
     def add_action(
         self,
@@ -204,20 +241,34 @@ class SimulationMemoryStore:
         return "\n".join(line for line in lines if line)
 
     def _read_records(self) -> Iterable[Dict[str, Any]]:
-        if not self.memory_path.exists():
-            return []
-
-        records = []
-        with self.memory_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
+        # Tail the file so separate platform stores see each other's appends
+        # without reparsing the complete history for every agent and round.
+        try:
+            f = self.memory_path.open("rb")
+        except FileNotFoundError:
+            self._records = []
+            self._read_offset = 0
+            self._file_identity = None
+            return self._records
+        with f:
+            stat = os.fstat(f.fileno())
+            identity = (stat.st_dev, stat.st_ino)
+            if identity != self._file_identity or stat.st_size < self._read_offset:
+                self._records = []
+                self._read_offset = 0
+                self._file_identity = identity
+            f.seek(self._read_offset)
+            while line := f.readline():
+                if not line.endswith(b"\n"):
+                    break  # A concurrent writer has not completed this record.
+                self._read_offset = f.tell()
                 try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
+                    record = json.loads(line)
+                    if isinstance(record, dict):
+                        self._records.append(record)
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-        return records
+        return self._records
 
     def _extract_content(self, action_type: str, action_args: Dict[str, Any]) -> str:
         keys_by_action = {

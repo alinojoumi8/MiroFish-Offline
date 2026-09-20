@@ -52,11 +52,13 @@ DOMPurify.addHook('afterSanitizeElements', (node) => {
   }
 })
 
-export function renderSafeMarkdown(content) {
+export function renderSafeMarkdown(content, { stripLeadingH2 = false } = {}) {
   if (content === null || content === undefined || content === '') return ''
 
   // Report section titles are rendered by their parent components.
-  const markdown = String(content).replace(/^##\s+.+(?:\r?\n)+/, '')
+  const markdown = stripLeadingH2
+    ? String(content).replace(/^##\s+.+(?:\r?\n)+/, '')
+    : String(content)
   const markdownHtml = marked.parse(markdown, {
     async: false,
     breaks: true,

@@ -1418,3 +1418,26 @@ def test_each_app_uses_its_configured_upload_folder_for_tasks(tmp_path, monkeypa
     assert Path(first_app.extensions["task_manager"].db_path) == first_uploads / "tasks.sqlite3"
     assert Path(second_app.extensions["task_manager"].db_path) == second_uploads / "tasks.sqlite3"
     assert second_app.extensions["task_manager"].get_task(task_id) is None
+
+
+def test_missing_resource_reads_do_not_create_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(ProjectManager, 'PROJECTS_DIR', str(tmp_path / 'projects'))
+    monkeypatch.setattr(SimulationManager, 'SIMULATION_DATA_DIR', str(tmp_path / 'simulations'))
+    assert ProjectManager.get_project('proj_0123456789ab') is None
+    assert SimulationManager()._load_simulation_state('sim_0123456789ab') is None
+    assert not (tmp_path / 'projects' / 'proj_0123456789ab').exists()
+    assert not (tmp_path / 'simulations' / 'sim_0123456789ab').exists()
+
+
+def test_fallback_task_manager_reuses_worker(tmp_path, monkeypatch):
+    from app.models import task as task_module
+    monkeypatch.setattr(task_module, '_fallback_manager', None)
+    monkeypatch.setattr(task_module, '_fallback_pid', None)
+    monkeypatch.setattr(task_module.Config, 'UPLOAD_FOLDER', str(tmp_path))
+    manager = task_module.get_task_manager()
+    try:
+        task_id = manager.create_task('fallback')
+        assert task_module.get_task_manager() is manager
+        assert task_module.get_task_manager().get_task(task_id).status == TaskStatus.PENDING
+    finally:
+        manager.close()

@@ -94,6 +94,9 @@ class OasisAgentProfile:
             "follower_count": self.follower_count,
             "statuses_count": self.statuses_count,
             "created_at": self.created_at,
+            "username": self.user_name,
+            "user_char": f"{self.bio} {self.persona}".strip(),
+            "description": self.bio,
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -838,7 +841,7 @@ Important:
                         if profiles_data:
                             fieldnames = list(profiles_data[0].keys())
                             output = io.StringIO(newline='')
-                            writer = csv.DictWriter(output, fieldnames=fieldnames)
+                            writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
                             writer.writeheader()
                             writer.writerows(profiles_data)
                             with resource_lock(
@@ -1000,8 +1003,8 @@ Important:
         """
         Save Twitter Profile as CSV format (compliant with OASIS official requirements)
 
-        The installed OASIS 0.2.5 contract is an exact, ordered header and
-        carries the values generated on each profile.
+        OASIS 0.2.5 reads username, user_char, and description. Retain
+        the other profile fields for application consumers.
         """
         import csv
 
@@ -1012,8 +1015,9 @@ Important:
         output = io.StringIO(newline='')
         writer = csv.DictWriter(output, fieldnames=[
             'user_id', 'user_name', 'name', 'bio', 'friend_count',
-            'follower_count', 'statuses_count', 'created_at'
-        ])
+            'follower_count', 'statuses_count', 'created_at',
+            'username', 'user_char', 'description'
+        ], lineterminator="\n")
         writer.writeheader()
         for profile in profiles:
             writer.writerow(profile.to_twitter_format())

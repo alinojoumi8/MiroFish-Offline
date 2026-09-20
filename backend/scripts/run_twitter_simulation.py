@@ -49,7 +49,7 @@ else:
 from simulation_memory import (
     SimulationMemoryStore,
     attach_memory_context_to_agent,
-    record_action_memory,
+    record_round_memories,
 )
 
 
@@ -596,6 +596,7 @@ class TwitterSimulationRunner:
             if agent_id not in agent_names:
                 agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
         memory_store = SimulationMemoryStore(self.simulation_dir, agent_names=agent_names)
+        last_memory_rowid = 0
         
         # Databasepath
         db_path = self._get_db_path()
@@ -635,22 +636,15 @@ class TwitterSimulationRunner:
                         action_type=ActionType.CREATE_POST,
                         action_args={"content": content}
                     )
-                    record_action_memory(
-                        memory_store,
-                        "twitter",
-                        0,
-                        {
-                            "agent_id": agent_id,
-                            "agent_name": agent_names.get(agent_id, f"Agent_{agent_id}"),
-                            "action_type": "CREATE_POST",
-                            "action_args": {"content": content},
-                        },
-                    )
                 except Exception as e:
                     print(f"  Warning: Unable to create for Agent {agent_id}Create initial posts: {e}")
             
             if initial_actions:
                 await self.env.step(initial_actions)
+                last_memory_rowid = record_round_memories(
+                    memory_store, "twitter", 0, db_path,
+                    last_memory_rowid, agent_names,
+                )
                 print(f"  Published {len(initial_actions)} initial posts")
         
         # Main simulation loop
@@ -682,6 +676,10 @@ class TwitterSimulationRunner:
             
             # Execute action
             await self.env.step(actions)
+            last_memory_rowid = record_round_memories(
+                memory_store, "twitter", round_num + 1, db_path,
+                last_memory_rowid, agent_names,
+            )
             
             # Print progress
             if (round_num + 1) % 10 == 0 or round_num == 0:
