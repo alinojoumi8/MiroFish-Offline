@@ -1,30 +1,46 @@
-"""
-Test whether Profile format generation meets OASIS requirements
-Verification:
-1. Twitter Profile generates CSV format
-2. Reddit Profile generates detailed JSON format
-"""
+"""Executable checks for the OASIS 0.2.5 profile file contract."""
 
+import csv
+import json
 import os
 import sys
-import json
-import csv
 import tempfile
+from typing import Iterable
 
-# Add project path
+# Add project path when run as ``python backend/scripts/test_profile_format.py``.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.services.oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
+from app.services.oasis_profile_generator import OasisAgentProfile, OasisProfileGenerator
 
 
-def test_profile_formats():
-    """Test Profile format"""
-    print("=" * 60)
-    print("OASIS Profile Format Test")
-    print("=" * 60)
-    
-    # Create test Profile data
-    test_profiles = [
+TWITTER_FIELDS = [
+    "user_id",
+    "user_name",
+    "name",
+    "bio",
+    "friend_count",
+    "follower_count",
+    "statuses_count",
+    "created_at",
+    "username", "user_char", "description",
+]
+REDDIT_REQUIRED_FIELDS = [
+    "user_id",
+    "realname",
+    "username",
+    "bio",
+    "persona",
+    "karma",
+    "created_at",
+    "age",
+    "gender",
+    "mbti",
+    "country",
+]
+
+
+def build_test_profiles() -> list[OasisAgentProfile]:
+    return [
         OasisAgentProfile(
             user_id=0,
             user_name="test_user_123",
@@ -60,107 +76,74 @@ def test_profile_formats():
             source_entity_type="University",
         ),
     ]
-    
+
+
+def assert_twitter_csv_contract(file_path: str) -> list[dict[str, str]]:
+    with open(file_path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == TWITTER_FIELDS, (
+            f"Twitter header mismatch: {reader.fieldnames!r}"
+        )
+        rows = list(reader)
+    for row in rows:
+        assert list(row) == TWITTER_FIELDS
+    return rows
+
+
+def assert_reddit_json_contract(file_path: str) -> list[dict]:
+    with open(file_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert isinstance(data, list), "Reddit profile payload must be a list"
+    for profile in data:
+        missing = [field for field in REDDIT_REQUIRED_FIELDS if field not in profile]
+        assert not missing, f"Reddit profile missing fields: {missing}"
+        assert "name" not in profile, "Reddit contract uses realname, not name"
+    return data
+
+
+def verify_profile_formats(profiles: Iterable[OasisAgentProfile] | None = None) -> None:
+    profiles = list(build_test_profiles() if profiles is None else profiles)
     generator = OasisProfileGenerator.__new__(OasisProfileGenerator)
-    
-    # Use temporary directory
     with tempfile.TemporaryDirectory() as temp_dir:
         twitter_path = os.path.join(temp_dir, "twitter_profiles.csv")
         reddit_path = os.path.join(temp_dir, "reddit_profiles.json")
-        
-        # Test Twitter CSV format
-        print("\n1. testTwitter Profile (CSV format)")
-        print("-" * 40)
-        generator._save_twitter_csv(test_profiles, twitter_path)
-        
-        # Read and verify CSV
-        with open(twitter_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            
-        print(f"   File: {twitter_path}")
-        print(f"   Lines: {len(rows)}")
-        print(f"   Headers: {list(rows[0].keys())}")
-        print(f"\n   Sample data (Row 1):")
-        for key, value in rows[0].items():
-            print(f"     {key}: {value}")
-        
-        # Verify required fields
-        required_twitter_fields = ['user_id', 'user_name', 'name', 'bio', 
-                                   'friend_count', 'follower_count', 'statuses_count', 'created_at']
-        missing = set(required_twitter_fields) - set(rows[0].keys())
-        if missing:
-            print(f"\n   [Error] Missing fields: {missing}")
-        else:
-            print(f"\n   [Pass] All required fields exist")
-        
-        # Test Reddit JSON format
-        print("\n2. testReddit Profile (detailed JSON format)")
-        print("-" * 40)
-        generator._save_reddit_json(test_profiles, reddit_path)
-        
-        # Read and verify JSON
-        with open(reddit_path, 'r', encoding='utf-8') as f:
-            reddit_data = json.load(f)
-        
-        print(f"   File: {reddit_path}")
-        print(f"   Number of entries: {len(reddit_data)}")
-        print(f"   Fields: {list(reddit_data[0].keys())}")
-        print(f"\n   Sample data (Item 1):")
-        print(json.dumps(reddit_data[0], ensure_ascii=False, indent=4))
-        
-        # Verify detailed format fields
-        required_reddit_fields = ['realname', 'username', 'bio', 'persona']
-        optional_reddit_fields = ['age', 'gender', 'mbti', 'country', 'profession', 'interested_topics']
-        
-        missing = set(required_reddit_fields) - set(reddit_data[0].keys())
-        if missing:
-            print(f"\n   [Error] Missing required fields: {missing}")
-        else:
-            print(f"\n   [Pass] All required fields exist")
-        
-        present_optional = set(optional_reddit_fields) & set(reddit_data[0].keys())
-        print(f"   [Info] Optional fields: {present_optional}")
-    
-    print("\n" + "=" * 60)
-    print("Test completed!")
-    print("=" * 60)
+        generator._save_twitter_csv(profiles, twitter_path)
+        generator._save_reddit_json(profiles, reddit_path)
+        twitter_rows = assert_twitter_csv_contract(twitter_path)
+        reddit_data = assert_reddit_json_contract(reddit_path)
+        assert len(twitter_rows) == len(profiles)
+        assert len(reddit_data) == len(profiles)
+        for profile, row, reddit_profile in zip(profiles, twitter_rows, reddit_data):
+            assert row["user_id"] == str(profile.user_id)
+            assert row["user_name"] == profile.user_name
+            assert row["name"] == profile.name
+            assert row["bio"] == profile.bio
+            assert row["friend_count"] == str(profile.friend_count)
+            assert row["follower_count"] == str(profile.follower_count)
+            assert row["statuses_count"] == str(profile.statuses_count)
+            assert reddit_profile["realname"] == profile.name
+            assert reddit_profile["persona"] == profile.persona
+            assert reddit_profile["age"] == (profile.age or 30)
+            assert reddit_profile["gender"] == (profile.gender or "other")
+            assert reddit_profile["mbti"] == (profile.mbti or "ISTJ")
+            assert reddit_profile["country"] == (profile.country or "US")
 
 
-def show_expected_formats():
-    """Show OASIS expected format"""
-    print("\n" + "=" * 60)
-    print("OASIS Expected Profile format reference")
-    print("=" * 60)
-    
-    print("\n1. Twitter Profile (CSV format)")
-    print("-" * 40)
-    twitter_example = """user_id,user_name,name,bio,friend_count,follower_count,statuses_count,created_at
-0,user0,User Zero,I am user zero with interests in technology.,100,150,500,2023-01-01
-1,user1,User One,Tech enthusiast and coffee lover.,200,250,1000,2023-01-02"""
-    print(twitter_example)
-    
-    print("\n2. Reddit Profile (detailed JSON format)")
-    print("-" * 40)
-    reddit_example = [
-        {
-            "realname": "James Miller",
-            "username": "millerhospitality",
-            "bio": "Passionate about hospitality & tourism.",
-            "persona": "James is a seasoned professional in the Hospitality & Tourism industry...",
-            "age": 40,
-            "gender": "male",
-            "mbti": "ESTJ",
-            "country": "UK",
-            "profession": "Hospitality & Tourism",
-            "interested_topics": ["Economics", "Business"]
-        }
-    ]
-    print(json.dumps(reddit_example, ensure_ascii=False, indent=2))
+def test_profile_formats() -> None:
+    """Pytest-compatible entry point retained for the standalone check."""
+    verify_profile_formats()
+
+
+def main(argv: list[str] | None = None) -> int:
+    del argv
+    try:
+        verify_profile_formats()
+    except (AssertionError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"OASIS profile contract FAILED: {exc}", file=sys.stderr)
+        return 1
+    print("OASIS profile contract passed")
+    return 0
 
 
 if __name__ == "__main__":
-    test_profile_formats()
-    show_expected_formats()
-
-
+    raise SystemExit(main(sys.argv[1:]))

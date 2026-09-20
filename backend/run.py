@@ -20,24 +20,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
 from app.config import Config
+from app.runtime import RuntimeConfigurationError
 
 
 def main():
     """Main function"""
-    # Validate configuration
-    errors = Config.validate()
-    if errors:
-        print("Configuration errors:")
-        for err in errors:
-            print(f"  - {err}")
-        print("\nPlease check configuration in .env file")
+    try:
+        app = create_app()
+    except RuntimeConfigurationError as error:
+        print(f"Configuration error: {error}")
+        print("Please check configuration in .env file")
         sys.exit(1)
 
-    # Create application
-    app = create_app()
-
     # Get runtime configuration
-    host = os.environ.get('FLASK_HOST', '0.0.0.0')
+    host = Config.MIROFISH_BIND_HOST
     port = int(os.environ.get('FLASK_PORT', 5001))
     debug = Config.DEBUG
 
@@ -47,4 +43,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -46,6 +46,12 @@ else:
     if os.path.exists(_backend_env):
         load_dotenv(_backend_env)
 
+from simulation_memory import (
+    SimulationMemoryStore,
+    attach_memory_context_to_agent,
+    record_round_memories,
+)
+
 
 import re
 
@@ -567,6 +573,17 @@ class RedditSimulationRunner:
             model=model,
             available_actions=self.AVAILABLE_ACTIONS,
         )
+
+        agent_names = {
+            cfg.get("agent_id"): cfg.get("entity_name", f"Agent_{cfg.get('agent_id')}")
+            for cfg in self.config.get("agent_configs", [])
+            if cfg.get("agent_id") is not None
+        }
+        for agent_id, agent in self.agent_graph.get_agents():
+            if agent_id not in agent_names:
+                agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
+        memory_store = SimulationMemoryStore(self.simulation_dir, agent_names=agent_names)
+        last_memory_rowid = 0
         
         db_path = self._get_db_path()
         if os.path.exists(db_path):
@@ -617,6 +634,10 @@ class RedditSimulationRunner:
             
             if initial_actions:
                 await self.env.step(initial_actions)
+                last_memory_rowid = record_round_memories(
+                    memory_store, "reddit", 0, db_path,
+                    last_memory_rowid, agent_names,
+                )
                 print(f"  Published {len(initial_actions)} initial posts")
         
         # Main simulation loop
@@ -635,12 +656,19 @@ class RedditSimulationRunner:
             if not active_agents:
                 continue
             
+            for agent_id, agent in active_agents:
+                attach_memory_context_to_agent(agent, memory_store, agent_id)
+
             actions = {
                 agent: LLMAction()
                 for _, agent in active_agents
             }
             
             await self.env.step(actions)
+            last_memory_rowid = record_round_memories(
+                memory_store, "reddit", round_num + 1, db_path,
+                last_memory_rowid, agent_names,
+            )
             
             if (round_num + 1) % 10 == 0 or round_num == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()
@@ -766,4 +794,3 @@ if __name__ == "__main__":
         pass
     finally:
         print("Simulation process exited")
-

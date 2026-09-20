@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
 from ..config import Config
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import get_task_manager, TaskStatus
 from ..storage import GraphStorage
 from .text_processor import TextProcessor
 
@@ -42,7 +42,7 @@ class GraphBuilderService:
 
     def __init__(self, storage: GraphStorage):
         self.storage = storage
-        self.task_manager = TaskManager()
+        self.task_manager = get_task_manager()
 
     def build_graph_async(
         self,

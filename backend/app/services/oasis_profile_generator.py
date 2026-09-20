@@ -9,6 +9,7 @@ Optimization improvements:
 """
 
 import json
+import io
 import random
 import time
 from typing import Dict, Any, List, Optional
@@ -19,6 +20,7 @@ from openai import OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.atomic_state import atomic_write_json, atomic_write_text, resource_lock
 from .entity_reader import EntityNode
 from ..storage import GraphStorage
 
@@ -62,22 +64,18 @@ class OasisAgentProfile:
         profile = {
             "user_id": self.user_id,
             "username": self.user_name,  # OASIS library requires field name as username (no underscore)
-            "name": self.name,
-            "bio": self.bio,
-            "persona": self.persona,
-            "karma": self.karma,
+            "realname": self.name,
+            "bio": self.bio[:150] if self.bio else self.name,
+            "persona": self.persona or f"{self.name} is a participant in social discussions.",
+            "karma": self.karma if self.karma else 1000,
             "created_at": self.created_at,
+            "age": self.age if self.age else 30,
+            "gender": self.gender if self.gender else "other",
+            "mbti": self.mbti if self.mbti else "ISTJ",
+            "country": self.country if self.country else "US",
         }
 
         # Add additional persona information (if available)
-        if self.age:
-            profile["age"] = self.age
-        if self.gender:
-            profile["gender"] = self.gender
-        if self.mbti:
-            profile["mbti"] = self.mbti
-        if self.country:
-            profile["country"] = self.country
         if self.profession:
             profile["profession"] = self.profession
         if self.interested_topics:
@@ -87,33 +85,19 @@ class OasisAgentProfile:
     
     def to_twitter_format(self) -> Dict[str, Any]:
         """Convert to Twitter platform format"""
-        profile = {
+        return {
             "user_id": self.user_id,
-            "username": self.user_name,  # OASIS library requires field name as username (no underscore)
+            "user_name": self.user_name,
             "name": self.name,
             "bio": self.bio,
-            "persona": self.persona,
             "friend_count": self.friend_count,
             "follower_count": self.follower_count,
             "statuses_count": self.statuses_count,
             "created_at": self.created_at,
+            "username": self.user_name,
+            "user_char": f"{self.bio} {self.persona}".strip(),
+            "description": self.bio,
         }
-
-        # Add additional persona information
-        if self.age:
-            profile["age"] = self.age
-        if self.gender:
-            profile["gender"] = self.gender
-        if self.mbti:
-            profile["mbti"] = self.mbti
-        if self.country:
-            profile["country"] = self.country
-        if self.profession:
-            profile["profession"] = self.profession
-        if self.interested_topics:
-            profile["interested_topics"] = self.interested_topics
-        
-        return profile
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to complete dictionary format"""
@@ -845,18 +829,26 @@ Important:
                     if output_platform == "reddit":
                         # Reddit JSON format
                         profiles_data = [p.to_reddit_format() for p in existing_profiles]
-                        with open(realtime_output_path, 'w', encoding='utf-8') as f:
-                            json.dump(profiles_data, f, ensure_ascii=False, indent=2)
+                        with resource_lock(
+                            f"simulation-profile:{realtime_output_path}",
+                            lock_path=f"{realtime_output_path}.lock",
+                        ):
+                            atomic_write_json(realtime_output_path, profiles_data)
                     else:
                         # Twitter CSV format
                         import csv
                         profiles_data = [p.to_twitter_format() for p in existing_profiles]
                         if profiles_data:
                             fieldnames = list(profiles_data[0].keys())
-                            with open(realtime_output_path, 'w', encoding='utf-8', newline='') as f:
-                                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                                writer.writeheader()
-                                writer.writerows(profiles_data)
+                            output = io.StringIO(newline='')
+                            writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
+                            writer.writeheader()
+                            writer.writerows(profiles_data)
+                            with resource_lock(
+                                f"simulation-profile:{realtime_output_path}",
+                                lock_path=f"{realtime_output_path}.lock",
+                            ):
+                                atomic_write_text(realtime_output_path, output.getvalue())
                 except Exception as e:
                     logger.warning(f"Real-time profile save failed: {e}")
         
@@ -1011,16 +1003,8 @@ Important:
         """
         Save Twitter Profile as CSV format (compliant with OASIS official requirements)
 
-        OASIS Twitter required CSV fields:
-        - user_id: User ID (starting from 0 based on CSV order)
-        - name: User real name
-        - username: Username in the system
-        - user_char: Detailed persona description (injected into LLM system prompt, guides agent behavior)
-        - description: Short public bio (displayed on user profile page)
-
-        user_char vs description difference:
-        - user_char: Internal use, LLM system prompt, determines how agent thinks and acts
-        - description: External display, visible to other users
+        OASIS 0.2.5 reads username, user_char, and description. Retain
+        the other profile fields for application consumers.
         """
         import csv
 
@@ -1028,33 +1012,19 @@ Important:
         if not file_path.endswith('.csv'):
             file_path = file_path.replace('.json', '.csv')
 
-        with open(file_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-
-            # Write OASIS required header
-            headers = ['user_id', 'name', 'username', 'user_char', 'description']
-            writer.writerow(headers)
-
-            # Write data rows
-            for idx, profile in enumerate(profiles):
-                # user_char: Complete persona (bio + persona) for LLM system prompt
-                user_char = profile.bio
-                if profile.persona and profile.persona != profile.bio:
-                    user_char = f"{profile.bio} {profile.persona}"
-                # Handle newlines (replace with space in CSV)
-                user_char = user_char.replace('\n', ' ').replace('\r', ' ')
-
-                # description: Short bio for external display
-                description = profile.bio.replace('\n', ' ').replace('\r', ' ')
-
-                row = [
-                    idx,                    # user_id: Sequential ID starting from 0
-                    profile.name,           # name: Real name
-                    profile.user_name,      # username: Username
-                    user_char,              # user_char: Complete persona (internal LLM use)
-                    description             # description: Short bio (external display)
-                ]
-                writer.writerow(row)
+        output = io.StringIO(newline='')
+        writer = csv.DictWriter(output, fieldnames=[
+            'user_id', 'user_name', 'name', 'bio', 'friend_count',
+            'follower_count', 'statuses_count', 'created_at',
+            'username', 'user_char', 'description'
+        ], lineterminator="\n")
+        writer.writeheader()
+        for profile in profiles:
+            writer.writerow(profile.to_twitter_format())
+        with resource_lock(
+            f"simulation-profile:{file_path}", lock_path=f"{file_path}.lock"
+        ):
+            atomic_write_text(file_path, output.getvalue())
 
         logger.info(f"Saved {len(profiles)} Twitter profiles to {file_path} (OASIS CSV format)")
     
@@ -1087,8 +1057,8 @@ Important:
 
         Required fields:
         - user_id: User ID (integer, used to match poster_agent_id in initial_posts)
+        - realname: Display name
         - username: Username
-        - name: Display name
         - bio: Bio
         - persona: Detailed persona
         - age: Age (integer)
@@ -1097,33 +1067,15 @@ Important:
         - country: Country
         """
         data = []
-        for idx, profile in enumerate(profiles):
-            # Use format consistent with to_reddit_format()
-            item = {
-                "user_id": profile.user_id if profile.user_id is not None else idx,  # Key: must include user_id
-                "username": profile.user_name,
-                "name": profile.name,
-                "bio": profile.bio[:150] if profile.bio else f"{profile.name}",
-                "persona": profile.persona or f"{profile.name} is a participant in social discussions.",
-                "karma": profile.karma if profile.karma else 1000,
-                "created_at": profile.created_at,
-                # OASIS required fields - ensure all have defaults
-                "age": profile.age if profile.age else 30,
-                "gender": self._normalize_gender(profile.gender),
-                "mbti": profile.mbti if profile.mbti else "ISTJ",
-                "country": profile.country if profile.country else "US",
-            }
-
-            # Optional fields
-            if profile.profession:
-                item["profession"] = profile.profession
-            if profile.interested_topics:
-                item["interested_topics"] = profile.interested_topics
-
+        for profile in profiles:
+            item = profile.to_reddit_format()
+            item["gender"] = self._normalize_gender(item["gender"])
             data.append(item)
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with resource_lock(
+            f"simulation-profile:{file_path}", lock_path=f"{file_path}.lock"
+        ):
+            atomic_write_json(file_path, data)
 
         logger.info(f"Saved {len(profiles)} Reddit profiles to {file_path} (JSON format, includes user_id field)")
     
@@ -1137,4 +1089,3 @@ Important:
         """[Deprecated] Please use save_profiles() method"""
         logger.warning("save_profiles_to_json is deprecated, please use save_profiles method")
         self.save_profiles(profiles, file_path, platform)
-

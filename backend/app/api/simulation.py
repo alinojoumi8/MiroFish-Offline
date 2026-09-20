@@ -4,7 +4,6 @@ Step2: Entity reading and filtering, OASIS simulation preparation and execution 
 """
 
 import os
-import traceback
 from flask import request, jsonify, send_file, current_app
 
 from . import simulation_bp
@@ -13,8 +12,19 @@ from ..services.entity_reader import EntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
+from ..services.report_agent import ReportManager
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
+from ..models.task import get_task_manager, TaskStatus
+from ..utils.resource_safety import (
+    ResourceValidationError,
+    resolve_resource_path,
+    validate_report_id,
+    validate_script_name,
+    validate_simulation_id,
+)
+from ..runtime import current_request_id
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
 
 logger = get_logger('mirofish.api.simulation')
 
@@ -81,8 +91,7 @@ def get_graph_entities(graph_id: str):
         logger.error(f"Failed to get knowledge graph entities: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -111,8 +120,7 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
         logger.error(f"Failed to get entity details: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -145,8 +153,7 @@ def get_entities_by_type(graph_id: str, entity_type: str):
         logger.error(f"Failed to get entities: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -222,8 +229,7 @@ def create_simulation():
         logger.error(f"Failed to create simulation: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -246,7 +252,9 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     import os
     from ..config import Config
     
-    simulation_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+    simulation_dir = resolve_resource_path(
+        Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
+    )
     
     # Check if directory exists
     if not os.path.exists(simulation_dir):
@@ -264,7 +272,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     existing_files = []
     missing_files = []
     for f in required_files:
-        file_path = os.path.join(simulation_dir, f)
+        file_path = resolve_resource_path(simulation_dir, f)
         if os.path.exists(file_path):
             existing_files.append(f)
         else:
@@ -278,7 +286,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         }
     
     # Check status in state.json
-    state_file = os.path.join(simulation_dir, "state.json")
+    state_file = resolve_resource_path(simulation_dir, 'state.json')
     try:
         import json
         with open(state_file, 'r', encoding='utf-8') as f:
@@ -301,8 +309,8 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         prepared_statuses = ["ready", "preparing", "running", "completed", "stopped", "failed"]
         if status in prepared_statuses and config_generated:
             # Get file statistics
-            profiles_file = os.path.join(simulation_dir, "reddit_profiles.json")
-            config_file = os.path.join(simulation_dir, "simulation_config.json")
+            profiles_file = resolve_resource_path(simulation_dir, 'reddit_profiles.json')
+            config_file = resolve_resource_path(simulation_dir, 'simulation_config.json')
             
             profiles_count = 0
             if os.path.exists(profiles_file):
@@ -389,7 +397,6 @@ def prepare_simulation():
     """
     import threading
     import os
-    from ..models.task import TaskManager, TaskStatus
     from ..config import Config
     
     try:
@@ -483,7 +490,7 @@ def prepare_simulation():
             # Failure does not affect subsequent process，Background task will retry
         
         # Create async task
-        task_manager = TaskManager()
+        task_manager = get_task_manager()
         task_id = task_manager.create_task(
             task_type="simulation_prepare",
             metadata={
@@ -497,6 +504,7 @@ def prepare_simulation():
         manager._save_simulation_state(state)
         
         # Define background task
+        failure_request_id = current_request_id()
         def run_prepare():
             try:
                 task_manager.update_task(
@@ -580,6 +588,7 @@ def prepare_simulation():
                     progress_callback=progress_callback,
                     parallel_profile_count=parallel_profile_count,
                     storage=storage,
+                    failure_request_id=failure_request_id,
                 )
                 
                 # Task complete
@@ -589,14 +598,23 @@ def prepare_simulation():
                 )
                 
             except Exception as e:
-                logger.error(f"Failed to prepare simulation: {str(e)}")
-                task_manager.fail_task(task_id, str(e))
+                logger.error(
+                    "Failed to prepare simulation request_id=%s error=%s",
+                    failure_request_id,
+                    str(e),
+                )
+                task_manager.fail_task(
+                    task_id,
+                    OPERATION_FAILURE_MESSAGE,
+                    request_id=failure_request_id,
+                )
                 
                 # Update simulation status to failed
                 state = manager.get_simulation(simulation_id)
                 if state:
                     state.status = SimulationStatus.FAILED
-                    state.error = str(e)
+                    state.error = OPERATION_FAILURE_MESSAGE
+                    state.error_request_id = failure_request_id
                     manager._save_simulation_state(state)
         
         # Start background thread
@@ -617,17 +635,19 @@ def prepare_simulation():
         })
         
     except ValueError as e:
+        logger.exception(
+            "Failed to start preparation request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
-        }), 404
+            "error": "Simulation preparation request is invalid"
+        }), 400
         
     except Exception as e:
         logger.error(f"Failed to start preparation task: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -659,8 +679,6 @@ def get_prepare_status():
             }
         }
     """
-    from ..models.task import TaskManager
-    
     try:
         data = request.get_json() or {}
         
@@ -702,7 +720,7 @@ def get_prepare_status():
                 "error": "Please provide task_id Or simulation_id"
             }), 400
         
-        task_manager = TaskManager()
+        task_manager = get_task_manager()
         task = task_manager.get_task(task_id)
         
         if not task:
@@ -772,8 +790,7 @@ def get_simulation(simulation_id: str):
         logger.error(f"Failed to get simulation status: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -801,8 +818,7 @@ def list_simulations():
         logger.error(f"Failed to list simulations: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -822,9 +838,7 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
     import json
     from datetime import datetime
     
-    # reports Directory path：backend/uploads/reports
-    # __file__ Is app/api/simulation.py，Need to go up two levels to backend/
-    reports_dir = os.path.join(os.path.dirname(__file__), '../../uploads/reports')
+    reports_dir = ReportManager.REPORTS_DIR
     if not os.path.exists(reports_dir):
         return None
     
@@ -832,11 +846,14 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
     
     try:
         for report_folder in os.listdir(reports_dir):
-            report_path = os.path.join(reports_dir, report_folder)
+            try:
+                report_id = validate_report_id(report_folder)
+                report_path = resolve_resource_path(reports_dir, report_id)
+                meta_file = resolve_resource_path(report_path, 'meta.json')
+            except ResourceValidationError:
+                continue
             if not os.path.isdir(report_path):
                 continue
-            
-            meta_file = os.path.join(report_path, "meta.json")
             if not os.path.exists(meta_file):
                 continue
             
@@ -846,7 +863,7 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
                 
                 if meta.get("simulation_id") == simulation_id:
                     matching_reports.append({
-                        "report_id": meta.get("report_id"),
+                        "report_id": report_id,
                         "created_at": meta.get("created_at", ""),
                         "status": meta.get("status", "")
                     })
@@ -974,8 +991,7 @@ def get_simulation_history():
         logger.error(f"Failed to get historical simulations: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1003,17 +1019,19 @@ def get_simulation_profiles(simulation_id: str):
         })
         
     except ValueError as e:
+        logger.exception(
+            "Failed to get profiles request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Simulation profiles are unavailable"
         }), 404
         
     except Exception as e:
         logger.error(f"GetProfileFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1053,7 +1071,9 @@ def get_simulation_profiles_realtime(simulation_id: str):
         platform = request.args.get('platform', 'reddit')
         
         # Get simulation directory
-        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        sim_dir = resolve_resource_path(
+            Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
+        )
         
         if not os.path.exists(sim_dir):
             return jsonify({
@@ -1063,9 +1083,9 @@ def get_simulation_profiles_realtime(simulation_id: str):
         
         # Determine file path
         if platform == "reddit":
-            profiles_file = os.path.join(sim_dir, "reddit_profiles.json")
+            profiles_file = resolve_resource_path(sim_dir, 'reddit_profiles.json')
         else:
-            profiles_file = os.path.join(sim_dir, "twitter_profiles.csv")
+            profiles_file = resolve_resource_path(sim_dir, 'twitter_profiles.csv')
         
         # Check if files exist
         file_exists = os.path.exists(profiles_file)
@@ -1093,7 +1113,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
         is_generating = False
         total_expected = None
         
-        state_file = os.path.join(sim_dir, "state.json")
+        state_file = resolve_resource_path(sim_dir, 'state.json')
         if os.path.exists(state_file):
             try:
                 with open(state_file, 'r', encoding='utf-8') as f:
@@ -1122,8 +1142,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
         logger.error(f"Real-time getProfileFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1156,7 +1175,9 @@ def get_simulation_config_realtime(simulation_id: str):
     
     try:
         # Get simulation directory
-        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        sim_dir = resolve_resource_path(
+            Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
+        )
         
         if not os.path.exists(sim_dir):
             return jsonify({
@@ -1165,7 +1186,7 @@ def get_simulation_config_realtime(simulation_id: str):
             }), 404
         
         # Config file path
-        config_file = os.path.join(sim_dir, "simulation_config.json")
+        config_file = resolve_resource_path(sim_dir, 'simulation_config.json')
         
         # Check if files exist
         file_exists = os.path.exists(config_file)
@@ -1189,7 +1210,7 @@ def get_simulation_config_realtime(simulation_id: str):
         generation_stage = None
         config_generated = False
         
-        state_file = os.path.join(sim_dir, "state.json")
+        state_file = resolve_resource_path(sim_dir, 'state.json')
         if os.path.exists(state_file):
             try:
                 with open(state_file, 'r', encoding='utf-8') as f:
@@ -1242,8 +1263,7 @@ def get_simulation_config_realtime(simulation_id: str):
         logger.error(f"Real-time getConfigFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1278,8 +1298,7 @@ def get_simulation_config(simulation_id: str):
         logger.error(f"Failed to get configuration: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1289,7 +1308,7 @@ def download_simulation_config(simulation_id: str):
     try:
         manager = SimulationManager()
         sim_dir = manager._get_simulation_dir(simulation_id)
-        config_path = os.path.join(sim_dir, "simulation_config.json")
+        config_path = resolve_resource_path(sim_dir, 'simulation_config.json')
         
         if not os.path.exists(config_path):
             return jsonify({
@@ -1303,12 +1322,13 @@ def download_simulation_config(simulation_id: str):
             download_name="simulation_config.json"
         )
         
+    except ResourceValidationError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.error(f"Failed to download configuration: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1328,17 +1348,12 @@ def download_simulation_script(script_name: str):
         scripts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../scripts'))
         
         # Verify script name
-        allowed_scripts = [
-            "run_twitter_simulation.py",
-            "run_reddit_simulation.py", 
-            "run_parallel_simulation.py",
-            "action_logger.py"
-        ]
-        
-        if script_name not in allowed_scripts:
+        try:
+            validate_script_name(script_name)
+        except ValueError:
             return jsonify({
                 "success": False,
-                "error": f"Unknown script: {script_name}，Optional: {allowed_scripts}"
+                "error": "Unknown script"
             }), 400
         
         script_path = os.path.join(scripts_dir, script_name)
@@ -1359,8 +1374,7 @@ def download_simulation_script(script_name: str):
         logger.error(f"Failed to download script: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1436,8 +1450,7 @@ def generate_profiles():
         logger.error(f"GenerateProfileFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1555,7 +1568,7 @@ def start_simulation():
                             return jsonify({
                                 "success": False,
                                 "error": f"Simulation is running. Please call /stop first or use force=true to force restart."
-                            }), 400
+                            }), 409
 
                 # If force mode，Clean runtime logs
                 if force:
@@ -1574,10 +1587,11 @@ def start_simulation():
                 return jsonify({
                     "success": False,
                     "error": f"Simulation not ready. Current status: {state.status.value}. Please call /prepare first"
-                }), 400
+                }), 409
         
         # Get knowledge graphID（For knowledge graph memory update）
         graph_id = None
+        storage = None
         if enable_graph_memory_update:
             # Get from simulation status or project graph_id
             graph_id = state.graph_id
@@ -1592,6 +1606,13 @@ def start_simulation():
                     "success": False,
                     "error": "Enable knowledge graph memory update requires valid graph_id，Please ensure project graph built"
                 }), 400
+
+            storage = current_app.extensions.get('neo4j_storage')
+            if not storage:
+                return jsonify({
+                    "success": False,
+                    "error": "GraphStorage not initialized; cannot enable graph memory update"
+                }), 503
             
             logger.info(f"Enable knowledge graph memory update: simulation_id={simulation_id}, graph_id={graph_id}")
         
@@ -1601,7 +1622,8 @@ def start_simulation():
             platform=platform,
             max_rounds=max_rounds,
             enable_graph_memory_update=enable_graph_memory_update,
-            graph_id=graph_id
+            graph_id=graph_id,
+            storage=storage
         )
         
         # Update simulation status
@@ -1611,7 +1633,6 @@ def start_simulation():
         response_data = run_state.to_dict()
         if max_rounds:
             response_data['max_rounds_applied'] = max_rounds
-        response_data['graph_memory_update_enabled'] = enable_graph_memory_update
         response_data['force_restarted'] = force_restarted
         if enable_graph_memory_update:
             response_data['graph_id'] = graph_id
@@ -1622,17 +1643,19 @@ def start_simulation():
         })
         
     except ValueError as e:
+        logger.exception(
+            "Failed to start simulation request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
-        }), 400
+            "error": "Simulation cannot be started in its current state"
+        }), 409
         
     except Exception as e:
         logger.error(f"Failed to start simulation: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1681,17 +1704,19 @@ def stop_simulation():
         })
         
     except ValueError as e:
+        logger.exception(
+            "Failed to stop simulation request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
-        }), 400
+            "error": "Simulation cannot be stopped in its current state"
+        }), 409
         
     except Exception as e:
         logger.error(f"Failed to stop simulation: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1750,8 +1775,7 @@ def get_run_status(simulation_id: str):
         logger.error(f"Failed to get running status: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1851,8 +1875,7 @@ def get_run_status_detail(simulation_id: str):
         logger.error(f"Failed to get detailed status: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1905,8 +1928,7 @@ def get_simulation_actions(simulation_id: str):
         logger.error(f"Failed to get action history: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1945,8 +1967,7 @@ def get_simulation_timeline(simulation_id: str):
         logger.error(f"Failed to get timeline: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1972,8 +1993,7 @@ def get_agent_stats(simulation_id: str):
         logger.error(f"Failed to get agent statistics: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -1996,13 +2016,12 @@ def get_simulation_posts(simulation_id: str):
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
         
-        sim_dir = os.path.join(
-            os.path.dirname(__file__),
-            f'../../uploads/simulations/{simulation_id}'
+        sim_dir = resolve_resource_path(
+            Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
         )
         
         db_file = f"{platform}_simulation.db"
-        db_path = os.path.join(sim_dir, db_file)
+        db_path = resolve_resource_path(sim_dir, db_file)
         
         if not os.path.exists(db_path):
             return jsonify({
@@ -2052,8 +2071,7 @@ def get_simulation_posts(simulation_id: str):
         logger.error(f"Failed to get posts: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2072,12 +2090,11 @@ def get_simulation_comments(simulation_id: str):
         limit = request.args.get('limit', 50, type=int)
         offset = request.args.get('offset', 0, type=int)
         
-        sim_dir = os.path.join(
-            os.path.dirname(__file__),
-            f'../../uploads/simulations/{simulation_id}'
+        sim_dir = resolve_resource_path(
+            Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
         )
         
-        db_path = os.path.join(sim_dir, "reddit_simulation.db")
+        db_path = resolve_resource_path(sim_dir, 'reddit_simulation.db')
         
         if not os.path.exists(db_path):
             return jsonify({
@@ -2127,8 +2144,7 @@ def get_simulation_comments(simulation_id: str):
         logger.error(f"Failed to get comments: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2243,23 +2259,28 @@ def interview_agent():
         })
         
     except ValueError as e:
+        logger.exception(
+            "Invalid interview request request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Invalid interview request"
         }), 400
         
     except TimeoutError as e:
+        logger.exception(
+            "Interview timed out request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": f"WaitInterviewResponse timeout: {str(e)}"
+            "error": "Interview response timed out"
         }), 504
         
     except Exception as e:
         logger.error(f"InterviewFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2381,23 +2402,28 @@ def interview_agents_batch():
         })
 
     except ValueError as e:
+        logger.exception(
+            "Invalid batch interview request request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Invalid batch interview request"
         }), 400
 
     except TimeoutError as e:
+        logger.exception(
+            "Batch interview timed out request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": f"Wait for batchInterviewResponse timeout: {str(e)}"
+            "error": "Batch interview response timed out"
         }), 504
 
     except Exception as e:
         logger.error(f"BatchInterviewFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2484,23 +2510,28 @@ def interview_all_agents():
         })
 
     except ValueError as e:
+        logger.exception(
+            "Invalid global interview request request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Invalid global interview request"
         }), 400
 
     except TimeoutError as e:
+        logger.exception(
+            "Global interview timed out request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": f"Wait for globalInterviewResponse timeout: {str(e)}"
+            "error": "Global interview response timed out"
         }), 504
 
     except Exception as e:
         logger.error(f"GlobalInterviewFailed: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2571,8 +2602,7 @@ def get_interview_history():
         logger.error(f"Failed to get interview history: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2636,8 +2666,7 @@ def get_env_status():
         logger.error(f"Failed to get environment status: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 
@@ -2697,15 +2726,17 @@ def close_simulation_env():
         })
         
     except ValueError as e:
+        logger.exception(
+            "Invalid close-environment request request_id=%s", current_request_id()
+        )
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Invalid environment close request"
         }), 400
         
     except Exception as e:
         logger.error(f"Failed to close environment: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500

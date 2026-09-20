@@ -55,7 +55,7 @@ The [original MiroFish](https://github.com/666ghj/MiroFish) was built for the Ch
 ```bash
 git clone https://github.com/nikmcfly/MiroFish-Offline.git
 cd MiroFish-Offline
-cp .env.example .env
+python3 scripts/init_local_env.py
 
 # Start all services (Neo4j, Ollama, MiroFish)
 docker compose up -d
@@ -72,9 +72,13 @@ Open `http://localhost:3000` — that's it.
 **1. Start Neo4j**
 
 ```bash
+python3 scripts/init_local_env.py
+set -a
+. ./.env
+set +a
 docker run -d --name neo4j \
   -p 7474:7474 -p 7687:7687 \
-  -e NEO4J_AUTH=neo4j/mirofish \
+  -e NEO4J_AUTH="neo4j/${NEO4J_PASSWORD}" \
   neo4j:5.15-community
 ```
 
@@ -89,7 +93,7 @@ ollama pull nomic-embed-text  # Embeddings (768d)
 **3. Configure & run backend**
 
 ```bash
-cp .env.example .env
+python3 scripts/init_local_env.py
 # Edit .env if your Neo4j/Ollama are on non-default ports
 
 cd backend
@@ -105,11 +109,13 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3000`. Manual Vite development binds the UI and its
+trusted API proxy to `127.0.0.1` only.
 
 ## Configuration
 
-All settings are in `.env` (copy from `.env.example`):
+All settings are in `.env`. Run `python3 scripts/init_local_env.py` to create
+it from `.env.example` and securely fill the required local secrets:
 
 ```bash
 # LLM — points to local Ollama (OpenAI-compatible API)
@@ -120,7 +126,13 @@ LLM_MODEL_NAME=qwen2.5:32b
 # Neo4j
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
-NEO4J_PASSWORD=mirofish
+NEO4J_PASSWORD=<required-local-password>
+
+# Runtime defaults (loopback only)
+MIROFISH_BIND_HOST=127.0.0.1
+MIROFISH_ALLOWED_ORIGINS=http://127.0.0.1:3000,http://localhost:3000
+# Required for a non-loopback bind such as 0.0.0.0
+MIROFISH_CONTROL_TOKEN=<required-for-lan-binding>
 
 # Embeddings
 EMBEDDING_MODEL=nomic-embed-text

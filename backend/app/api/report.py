@@ -4,7 +4,6 @@ Provides interfaces for simulation report generation, retrieval, and conversatio
 """
 
 import os
-import traceback
 import threading
 from flask import request, jsonify, send_file, current_app
 
@@ -13,9 +12,11 @@ from ..config import Config
 from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import get_task_manager, TaskStatus
 from ..services.graph_tools import GraphToolsService
 from ..utils.logger import get_logger
+from ..runtime import current_request_id
+from ..utils.client_errors import OPERATION_FAILURE_MESSAGE
 
 logger = get_logger('mirofish.api.report')
 
@@ -62,7 +63,7 @@ def generate_report():
         import uuid
         report_id = f"report_{uuid.uuid4().hex[:12]}"
 
-        task_manager = TaskManager()
+        task_manager = get_task_manager()
         task_id = task_manager.create_task(
             task_type="report_generate",
             metadata={"simulation_id": simulation_id, "graph_id": graph_id, "report_id": report_id}
@@ -75,6 +76,8 @@ def generate_report():
             return jsonify({"success": False, "error": "GraphStorage not initialized — check Neo4j connection"}), 500
         graph_tools = GraphToolsService(storage=storage)
 
+        failure_request_id = current_request_id()
+
         def run_generate():
             try:
                 task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="Initializing Report Agent...")
@@ -82,7 +85,8 @@ def generate_report():
                     graph_id=graph_id,
                     simulation_id=simulation_id,
                     simulation_requirement=simulation_requirement,
-                    graph_tools=graph_tools
+                    graph_tools=graph_tools,
+                    failure_request_id=failure_request_id,
                 )
                 def progress_callback(stage, progress, message):
                     task_manager.update_task(task_id, progress=progress, message=f"[{stage}] {message}")
@@ -91,10 +95,22 @@ def generate_report():
                 if report.status == ReportStatus.COMPLETED:
                     task_manager.complete_task(task_id, result={"report_id": report.report_id, "simulation_id": simulation_id, "status": "completed"})
                 else:
-                    task_manager.fail_task(task_id, report.error or "Report generation failed")
+                    task_manager.fail_task(
+                        task_id,
+                        report.error or OPERATION_FAILURE_MESSAGE,
+                        request_id=failure_request_id,
+                    )
             except Exception as e:
-                logger.error(f"Report generation failed: {str(e)}")
-                task_manager.fail_task(task_id, str(e))
+                logger.error(
+                    "Report generation failed request_id=%s error=%s",
+                    failure_request_id,
+                    str(e),
+                )
+                task_manager.fail_task(
+                    task_id,
+                    OPERATION_FAILURE_MESSAGE,
+                    request_id=failure_request_id,
+                )
 
         thread = threading.Thread(target=run_generate, daemon=True)
         thread.start()
@@ -110,7 +126,7 @@ def generate_report():
 
     except Exception as e:
         logger.error(f"Failed to start report generation task: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/generate/status', methods=['POST'])
@@ -135,7 +151,7 @@ def get_generate_status():
         if not task_id:
             return jsonify({"success": False, "error": "Please provide task_id or simulation_id"}), 400
 
-        task_manager = TaskManager()
+        task_manager = get_task_manager()
         task = task_manager.get_task(task_id)
         if not task:
             return jsonify({"success": False, "error": f"Task does not exist: {task_id}"}), 404
@@ -158,7 +174,7 @@ def get_report(report_id: str):
         return jsonify({"success": True, "data": report.to_dict()})
     except Exception as e:
         logger.error(f"Failed to get report: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/by-simulation/<simulation_id>', methods=['GET'])
@@ -170,7 +186,7 @@ def get_report_by_simulation(simulation_id: str):
         return jsonify({"success": True, "data": report.to_dict()})
     except Exception as e:
         logger.error(f"Failed to get report: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/list', methods=['GET'])
@@ -182,7 +198,7 @@ def list_reports():
         return jsonify({"success": True, "data": [r.to_dict() for r in reports], "count": len(reports)})
     except Exception as e:
         logger.error(f"Failed to list reports: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>/download', methods=['GET'])
@@ -204,7 +220,7 @@ def download_report(report_id: str):
 
     except Exception as e:
         logger.error(f"Failed to download report: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>', methods=['DELETE'])
@@ -216,7 +232,7 @@ def delete_report(report_id: str):
         return jsonify({"success": True, "message": f"Report deleted: {report_id}"})
     except Exception as e:
         logger.error(f"Failed to delete report: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Report Agent Chat Interface ==============
@@ -266,7 +282,7 @@ def chat_with_report_agent():
 
     except Exception as e:
         logger.error(f"Chat failed: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Report Progress and Section Retrieval Interface ==============
@@ -280,7 +296,7 @@ def get_report_progress(report_id: str):
         return jsonify({"success": True, "data": progress})
     except Exception as e:
         logger.error(f"Failed to get report progress: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>/sections', methods=['GET'])
@@ -297,7 +313,7 @@ def get_report_sections(report_id: str):
         }})
     except Exception as e:
         logger.error(f"Failed to get section list: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>/section/<int:section_index>', methods=['GET'])
@@ -311,7 +327,7 @@ def get_single_section(report_id: str, section_index: int):
         return jsonify({"success": True, "data": {"filename": f"section_{section_index:02d}.md", "content": content}})
     except Exception as e:
         logger.error(f"Failed to get section content: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Report Status Check Interface ==============
@@ -333,7 +349,7 @@ def check_report_status(simulation_id: str):
         }})
     except Exception as e:
         logger.error(f"Failed to check report status: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Agent Log Interface ==============
@@ -346,7 +362,7 @@ def get_agent_log(report_id: str):
         return jsonify({"success": True, "data": log_data})
     except Exception as e:
         logger.error(f"Failed to get agent log: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>/agent-log/stream', methods=['GET'])
@@ -356,7 +372,7 @@ def stream_agent_log(report_id: str):
         return jsonify({"success": True, "data": {"logs": logs, "count": len(logs)}})
     except Exception as e:
         logger.error(f"Failed to get agent log: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Console Log Interface ==============
@@ -369,7 +385,7 @@ def get_console_log(report_id: str):
         return jsonify({"success": True, "data": log_data})
     except Exception as e:
         logger.error(f"Failed to get console log: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/<report_id>/console-log/stream', methods=['GET'])
@@ -379,7 +395,7 @@ def stream_console_log(report_id: str):
         return jsonify({"success": True, "data": {"logs": logs, "count": len(logs)}})
     except Exception as e:
         logger.error(f"Failed to get console log: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============== Tool Call Interface (For Debugging) ==============
@@ -401,7 +417,7 @@ def search_graph_tool():
         return jsonify({"success": True, "data": result.to_dict()})
     except Exception as e:
         logger.error(f"Graph search failed: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @report_bp.route('/tools/statistics', methods=['POST'])
@@ -419,4 +435,4 @@ def get_graph_statistics_tool():
         return jsonify({"success": True, "data": result})
     except Exception as e:
         logger.error(f"Failed to get graph statistics: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": str(e)}), 500

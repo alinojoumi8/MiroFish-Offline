@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
+from ..utils.resource_safety import resolve_resource_path, validate_simulation_id
+from ..config import Config
 from ..storage import GraphStorage
 
 logger = get_logger('mirofish.graph_tools')
@@ -1283,15 +1285,14 @@ Return the sub-questions as a JSON list."""
         import os
         import csv
 
-        sim_dir = os.path.join(
-            os.path.dirname(__file__),
-            f'../../uploads/simulations/{simulation_id}'
+        sim_dir = resolve_resource_path(
+            Config.OASIS_SIMULATION_DATA_DIR, validate_simulation_id(simulation_id)
         )
 
         profiles = []
 
         # Preferentially try to read Reddit JSON format
-        reddit_profile_path = os.path.join(sim_dir, "reddit_profiles.json")
+        reddit_profile_path = resolve_resource_path(sim_dir, 'reddit_profiles.json')
         if os.path.exists(reddit_profile_path):
             try:
                 with open(reddit_profile_path, 'r', encoding='utf-8') as f:
@@ -1302,17 +1303,20 @@ Return the sub-questions as a JSON list."""
                 logger.warning(f"Failed to read reddit_profiles.json: {e}")
 
         # Try to read Twitter CSV format
-        twitter_profile_path = os.path.join(sim_dir, "twitter_profiles.csv")
+        twitter_profile_path = resolve_resource_path(sim_dir, 'twitter_profiles.csv')
         if os.path.exists(twitter_profile_path):
             try:
                 with open(twitter_profile_path, 'r', encoding='utf-8') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
+                        # Support both application profile fields and the
+                        # username/description/user_char fields used by OASIS.
+                        bio = row.get("bio") or row.get("description", "")
                         profiles.append({
-                            "realname": row.get("name", ""),
-                            "username": row.get("username", ""),
-                            "bio": row.get("description", ""),
-                            "persona": row.get("user_char", ""),
+                            "realname": row.get("realname") or row.get("name", ""),
+                            "username": row.get("user_name") or row.get("username", ""),
+                            "bio": bio,
+                            "persona": row.get("persona") or row.get("user_char") or bio,
                             "profession": "Unknown"
                         })
                 logger.info(f"Loaded {len(profiles)} profiles from twitter_profiles.csv")
